@@ -11,7 +11,9 @@
 // window under the pointer, as in i3).
 #include "head.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
@@ -59,6 +61,33 @@ Cmd report_output(Head::Model& m) {
     return say(std::move(req));
 }
 
+/// The window under the pointer, by the arrangement on screen.
+std::optional<wm::WindowId> under(const Head::Model& m) {
+    const auto p = m.pointer;
+    for (const auto& sc : m.arranged.screens)
+        for (auto t = sc.tiles.rbegin(); t != sc.tiles.rend(); ++t) {
+            const auto& f = t->frame;
+            if (p.x >= f.left() && p.x < f.left() + f.size.width && p.y >= f.top() && p.y < f.top() + f.size.height)
+                return t->window;
+        }
+    return std::nullopt;
+}
+
+/// Scroll is predicted here: the pixels we have move at once, by the same
+/// distance the client will move them (Wayland's smooth scroll is in
+/// surface px; I4_NO_PREDICT_SCROLL=1 turns it off). The frame that answers
+/// replaces the shifted picture. A shift never exceeds a screen: past that
+/// there is nothing to show but what the session sends.
+void predict_scroll(Head::Model& m, double dy_px) {
+    static const bool off = std::getenv("I4_NO_PREDICT_SCROLL") != nullptr;
+    if (off || dy_px == 0.0) return;
+    const auto w = under(m);
+    if (!w || !m.textures.contains(*w)) return;
+    auto& s = m.shifts[*w];
+    s = std::clamp(s + static_cast<float>(dy_px), -static_cast<float>(m.screen.height),
+                   static_cast<float>(m.screen.height));
+}
+
 }  // namespace
 
 Cmd Head::init(Model& m) {
@@ -84,6 +113,23 @@ Cmd Head::update(Model& m, Heard h) {
         const bool remote = std::holds_alternative<link::down::Encoded>(c->layout) ||
                             std::holds_alternative<link::down::Video>(c->layout);
         const auto tex = texture_of(c->window);
+        // A predicted scroll gives way to the client's own: the session's
+        // move (buffer px) is how far it really went. Frames that do not
+        // answer it (a cursor blink drawn before the scroll) leave it; three
+        // in a row mean the client is not scrolling (htop ignores the wheel).
+        if (auto sh = m.shifts.find(c->window); sh != m.shifts.end()) {
+            const auto* e = std::get_if<link::down::Encoded>(&c->layout);
+            if (e && e->scroll) {
+                const float moved = static_cast<float>(e->scroll->dy) / static_cast<float>(std::max(1, m.scale));
+                const float left = sh->second - moved;
+                if (left * sh->second <= 0.0f || std::abs(left) < 1.0f) m.shifts.erase(sh);
+                else sh->second = left;
+                m.unanswered.erase(c->window);
+            } else if (++m.unanswered[c->window] >= 3) {
+                m.shifts.erase(sh);
+                m.unanswered.erase(c->window);
+            }
+        }
         if (h.texture != 0) {
             m.textures[c->window] = h.texture;
         } else if (h.patch) {
@@ -277,6 +323,8 @@ Cmd Head::update(Model& m, KeyboardLeft) {
 
 Cmd Head::update(Model& m, ScrollInput s) {
     if (!m.replica.ready() || m.launcher.open) return {};
+    // Smooth scroll: wl_fixed (1/256 px), positive is down.
+    predict_scroll(m, static_cast<double>(s.scroll.dy) / 256.0);
     return say(s.scroll);
 }
 
@@ -287,6 +335,7 @@ Cmd Head::update(Model& m, mayag::ScrollEvent s) {
     link::up::Scroll out;
     out.dx = static_cast<std::int32_t>(-s.delta.x * 256.0f);
     out.dy = static_cast<std::int32_t>(-s.delta.y * 256.0f);
+    predict_scroll(m, -static_cast<double>(s.delta.y));
     return say(out);
 }
 
@@ -311,6 +360,7 @@ Cmd Head::update(Model& m, mayag::Clicked c) {
 
 Cmd Head::update(Model& m, mayag::MouseMove e) {
     if (!m.replica.ready() || m.launcher.open) return {};
+    m.pointer = desktop(e.position);
     return say(link::up::Motion{desktop(e.position)});
 }
 
@@ -363,7 +413,7 @@ mayag::Node Head::view(const Model& m) {
         for (auto ws : o.workspaces) hud.workspaces.push_back(s.workspaces.at(ws).name);
     for (const auto& sc : m.arranged.screens) hud.focused_workspace = sc.workspace_name;
     hud.latency_ms = -1;  // a real link: the bar shows requests in flight instead
-    auto frame = head::view(m.arranged, m.motion, hud, m.textures);
+    auto frame = head::view(m.arranged, m.motion, hud, m.textures, m.shifts);
     if (m.launcher.open) frame.add_child(launcher_view(m.launcher, m.apps, m.screen));
     if (!m.notice.empty()) frame.add_child(notice_view(m.notice, m.screen));
     return frame;

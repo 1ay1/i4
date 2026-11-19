@@ -4,6 +4,8 @@
 // recorded effects out. No window, no GPU, no session.
 #include <jaal/host/headless.hpp>
 
+#include <algorithm>
+
 #include "check.hpp"
 #include "head/head.hpp"
 #include "head/pixels.hpp"
@@ -188,6 +190,62 @@ TEST(the_pointer_is_reported_in_desktop_pixels) {
     h.send(mayag::MouseMove{{100.0f, 100.0f + bar_height}});
     const auto s = said(h);
     CHECK((s.size() == 1 && s.front() == link::Up{link::up::Motion{{100, 100}}}));
+}
+
+TEST(a_scroll_moves_the_pixels_at_once_and_the_session_move_settles_it) {
+    H h;
+    welcome(h);
+    (void)said(h);
+    // A remote window with pixels, under the pointer.
+    mayag::ImageData img;
+    img.width = img.height = 1;
+    img.rgba = {1, 2, 3, 255};
+    h.send(Heard{link::down::Content{wm::WindowId{2}, 1, {1, 1}, link::down::ShmLayout{0, 4, true}},
+                 jaal::shared<mayag::ImageData>::make(std::move(img))});
+    const auto& tiles = h.model().arranged.screens.front().tiles;
+    const auto it = std::ranges::find_if(tiles, [](const auto& t) { return t.window == wm::WindowId{2}; });
+    CHECK(it != tiles.end());
+    h.send(mayag::MouseMove{{static_cast<float>(it->frame.left() + 10), static_cast<float>(it->frame.top() + 10) + bar_height}});
+    // Three notches down: 45 px predicted, and sent.
+    link::up::Scroll s;
+    s.dy = 45 * 256;
+    h.send(ScrollInput{s});
+    CHECK(h.model().shifts.contains(wm::WindowId{2}));
+    CHECK(h.model().shifts.at(wm::WindowId{2}) == 45.0f);
+    CHECK(std::ranges::any_of(said(h), [](const link::Up& u) { return is<link::up::Scroll>(u); }));
+    // The session's move answers 30 px of it (scale 1): 15 still predicted.
+    link::down::Encoded e;
+    e.keyframe = false;
+    e.scroll = link::down::Move{0, 0, 1, 1, 30};
+    h.send(Heard{link::down::Content{wm::WindowId{2}, 2, {1, 1}, e}});
+    CHECK(h.model().shifts.contains(wm::WindowId{2}) && h.model().shifts.at(wm::WindowId{2}) == 15.0f);
+    // The rest: settled, nothing left to guess.
+    e.scroll = link::down::Move{0, 0, 1, 1, 15};
+    h.send(Heard{link::down::Content{wm::WindowId{2}, 3, {1, 1}, e}});
+    CHECK(!h.model().shifts.contains(wm::WindowId{2}));
+}
+
+TEST(a_window_that_does_not_scroll_drops_the_guess) {
+    H h;
+    welcome(h);
+    (void)said(h);
+    mayag::ImageData img;
+    img.width = img.height = 1;
+    img.rgba = {1, 2, 3, 255};
+    h.send(Heard{link::down::Content{wm::WindowId{2}, 1, {1, 1}, link::down::ShmLayout{0, 4, true}},
+                 jaal::shared<mayag::ImageData>::make(std::move(img))});
+    const auto& tiles = h.model().arranged.screens.front().tiles;
+    const auto it = std::ranges::find_if(tiles, [](const auto& t) { return t.window == wm::WindowId{2}; });
+    h.send(mayag::MouseMove{{static_cast<float>(it->frame.left() + 10), static_cast<float>(it->frame.top() + 10) + bar_height}});
+    link::up::Scroll s;
+    s.dy = 45 * 256;
+    h.send(ScrollInput{s});
+    CHECK(h.model().shifts.contains(wm::WindowId{2}));
+    // htop ignores the wheel: frames keep coming, none of them a move.
+    link::down::Encoded e;
+    e.keyframe = false;
+    for (std::uint64_t g = 2; g < 5; ++g) h.send(Heard{link::down::Content{wm::WindowId{2}, g, {1, 1}, e}});
+    CHECK(!h.model().shifts.contains(wm::WindowId{2}));
 }
 
 TEST(i3_exit_quits) {

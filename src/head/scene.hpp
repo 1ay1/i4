@@ -60,11 +60,15 @@ inline constexpr float bar_height = 28.0f;
 
 /// A window's latest pixels, as a mayag texture id.
 using Textures = std::map<wm::WindowId, std::uint32_t>;
+/// Scrolling the head predicts ahead of the session: a window's pixels drawn
+/// shifted up by this many logical px (negative: down), inside its frame,
+/// until the frame that answers the scroll lands.
+using Shifts = std::map<wm::WindowId, float>;
 
 /// The whole frame: the bar on top, the output's tiles and titles under it.
 /// A window with a texture shows its pixels; one without, its name.
 [[nodiscard]] mayag::Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud,
-                               const Textures& textures = {});
+                               const Textures& textures = {}, const Shifts& shifts = {});
 
 /// The node id of the launcher's i-th row, for click hit-testing.
 [[nodiscard]] std::uint64_t launcher_row(std::size_t i);

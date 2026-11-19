@@ -153,6 +153,12 @@ struct Head {
         /// Each window's newest frame: the texture it is uploaded as, and
         /// the generation, for the Shown that paces the client.
         std::map<wm::WindowId, std::uint32_t> textures;
+        /// Scroll predicted ahead of the session, per window (logical px up).
+        Shifts shifts;
+        /// Frames since a window's shift began that did not answer it.
+        std::map<wm::WindowId, int> unanswered;
+        /// The pointer, in desktop px (for which window a scroll lands in).
+        Point<space::Desktop> pointer{};
 
         wm::Arrangement arranged;
         Motion motion;

@@ -359,8 +359,10 @@ public:
             }
             if (c && probe_sent_ && !probe_answered_) {
                 probe_answered_ = true;
-                std::fprintf(stderr, "i4-head: probe key->frame %.2f ms\n",
-                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - *probe_sent_).count());
+                const auto* e = std::get_if<link::down::Encoded>(&c->layout);
+                std::fprintf(stderr, "i4-head: probe key->frame %.2f ms%s\n",
+                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - *probe_sent_).count(),
+                             e && e->scroll ? "  (move)" : "");
             }
             // The client answered: the next frame drawn shows it, and its
             // presentation closes the key's input-to-photon measurement.
@@ -507,8 +509,23 @@ public:
         if (probe_sent_ && now - *probe_sent_ < std::chrono::milliseconds(every)) return;
         if (probe_sent_ && !probe_answered_) std::fprintf(stderr, "i4-head: probe unanswered\n");
         constexpr std::uint32_t kKeyA = 30;
-        send_up(link::Up{link::up::Key{kKeyA, true, {}}});
-        send_up(link::Up{link::up::Key{kKeyA, false, {}}});
+        static const bool scroll = std::getenv("I4_HEAD_SCROLL_PROBE") != nullptr;
+        if (scroll) {
+            // The wheel goes to the window under the pointer: put it in the
+            // middle of the screen (where a lone window is) first.
+            send_up(link::Up{link::up::Motion{{400, 300}}});
+            // Three wheel notches down then back up, alternating: a page
+            // that can scroll both ways forever.
+            link::up::Scroll s;
+            s.source = 0;
+            s.dy = (probe_flip_ ? -1 : 1) * 3 * 15 * 256;  // 3 x 15 px
+            s.dy120 = (probe_flip_ ? -1 : 1) * 3 * 120;
+            probe_flip_ = !probe_flip_;
+            send_up(link::Up{s});
+        } else {
+            send_up(link::Up{link::up::Key{kKeyA, true, {}}});
+            send_up(link::Up{link::up::Key{kKeyA, false, {}}});
+        }
         probe_sent_ = now;
         probe_answered_ = false;
         answer_due_ = std::chrono::duration<double>(now.time_since_epoch()).count();
@@ -743,6 +760,7 @@ private:
     std::optional<double> key_down_at_;  // the newest key press, kernel time (s)
     std::optional<std::chrono::steady_clock::time_point> probe_sent_;  // I4_HEAD_PROBE
     bool probe_answered_ = true;
+    bool probe_flip_ = false;
     std::uint64_t input_seq_ = 0;  // up::Sequenced numbers sent
     std::optional<double> answer_due_;   // the oldest press sent to a client and not yet answered
     std::vector<double> photon_;          // key -> photon samples (ms)

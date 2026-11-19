@@ -30,7 +30,7 @@ Vec4 vec(Rect<space::Desktop> r) {
             static_cast<float>(r.size.height)};
 }
 
-Node tile(const wm::Tile& t, Vec4 at, const std::string& label, std::optional<std::uint32_t> texture) {
+Node tile(const wm::Tile& t, Vec4 at, const std::string& label, std::optional<std::uint32_t> texture, float shift = 0.0f) {
     const float inset = 3.0f;  // a hair of desktop between tiles
     const auto accent = t.focused ? mauve : surface1;
     const float w = std::max(0.0f, at.z - 2 * inset), h_ = std::max(0.0f, at.w - 2 * inset);
@@ -42,7 +42,8 @@ Node tile(const wm::Tile& t, Vec4 at, const std::string& label, std::optional<st
                       | border(2, accent) | radius(6) | clip
                       | shadow(t.layer == wm::Layer::floating ? 24.0f : 6.0f, crust.fade(0.6f)))
                          .build();
-        frame.add_child((image(*texture) | absolute(2, 2) | size(std::max(0.0f, w - 4), std::max(0.0f, h_ - 4))).build());
+        // A predicted scroll moves the pixels we have; the frame clips them.
+        frame.add_child((image(*texture) | absolute(2, 2 - shift) | size(std::max(0.0f, w - 4), std::max(0.0f, h_ - 4))).build());
         return frame;
     }
     return (v(text_owned(label) | font(13) | semibold | fg(t.focused ? text_c : subtext) | ellipsis,
@@ -125,13 +126,15 @@ std::optional<Vec4> Motion::at(wm::WindowId w) const {
     return it->second.value();
 }
 
-Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud, const Textures& textures) {
+Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud, const Textures& textures, const Shifts& shifts) {
     std::vector<Node> layers;
     for (const auto& sc : a.screens) {
         for (const auto& t : sc.tiles) {
             const auto at = motion.at(t.window).value_or(vec(t.frame));
             const auto tex = textures.find(t.window);
-            layers.push_back(tile(t, at, t.label, tex == textures.end() ? std::nullopt : std::optional{tex->second}));
+            const auto sh = shifts.find(t.window);
+            layers.push_back(tile(t, at, t.label, tex == textures.end() ? std::nullopt : std::optional{tex->second},
+                                  sh == shifts.end() ? 0.0f : sh->second));
         }
         for (const auto& ti : sc.titles)
             if (ti.rect.size.height > 0) layers.push_back(title(ti));
