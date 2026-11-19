@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 
 #include <zstd.h>
 
@@ -31,6 +32,58 @@ struct Grid {
 
 }  // namespace
 
+namespace {
+
+std::uint64_t hash_row(const std::byte* p, std::size_t n) {
+    // FNV-1a over 8-byte words (a row is whole pixels: n is a multiple of 4).
+    std::uint64_t h = 1469598103934665603ull;
+    std::size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        std::uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        h = (h ^ w) * 1099511628211ull;
+    }
+    for (; i < n; ++i) h = (h ^ std::to_integer<std::uint8_t>(p[i])) * 1099511628211ull;
+    return h;
+}
+
+}  // namespace
+
+std::optional<link::down::Move> find_move(const std::vector<std::uint64_t>& now, const std::vector<std::uint64_t>& was,
+                                          std::int32_t width) {
+    const auto h = static_cast<std::int32_t>(now.size());
+    if (h < 16 || was.size() != now.size()) return std::nullopt;
+    int changed = 0;
+    for (std::int32_t y = 0; y < h; ++y) changed += now[static_cast<std::size_t>(y)] != was[static_cast<std::size_t>(y)];
+    if (changed < 64 && changed * 4 < h) return std::nullopt;  // not enough moved to be a scroll
+    std::map<std::uint64_t, std::int32_t> where;  // a row of the last frame, if unique
+    for (std::int32_t y = 0; y < h; ++y) {
+        auto [it, fresh] = where.try_emplace(was[static_cast<std::size_t>(y)], y);
+        if (!fresh) it->second = -1;
+    }
+    std::map<std::int32_t, int> votes;
+    for (std::int32_t y = 0; y < h; ++y) {
+        const auto r = now[static_cast<std::size_t>(y)];
+        if (r == was[static_cast<std::size_t>(y)]) continue;
+        if (auto it = where.find(r); it != where.end() && it->second >= 0 && it->second != y) ++votes[it->second - y];
+    }
+    std::int32_t dy = 0;
+    int best = 0;
+    for (const auto& [d, n] : votes)
+        if (n > best) best = n, dy = d;
+    if (best < 8 || best * 3 < changed) return std::nullopt;
+    std::int32_t run0 = -1, best0 = 0, best1 = 0, last = -1;
+    for (std::int32_t y = 0; y < h; ++y) {
+        const auto from = y + dy;
+        if (from < 0 || from >= h || now[static_cast<std::size_t>(y)] != was[static_cast<std::size_t>(from)]) continue;
+        if (run0 < 0 || y - last > 4) run0 = y;
+        last = y;
+        if (y + 1 - run0 > best1 - best0) best0 = run0, best1 = y + 1;
+    }
+    if (best1 - best0 < 8) return std::nullopt;
+    return link::down::Move{0, best0, width, best1 - best0, dy};
+}
+
 std::optional<link::down::Encoded> encode(Canvas& shadow, const Source& s, std::uint32_t tile, int level) {
     if (s.width <= 0 || s.height <= 0 || s.offset < 0 || s.stride < s.width * 4) return std::nullopt;
     const auto end = static_cast<std::uint64_t>(s.offset) +
@@ -49,6 +102,25 @@ std::optional<link::down::Encoded> encode(Canvas& shadow, const Source& s, std::
     }
     const Grid g{s.width, s.height, tile};
     const auto pitch = static_cast<std::size_t>(s.width) * 4;
+    // A scroll (a terminal printing, a page moving): rows of the shadow that
+    // reappear shifted. The head moves its copy the same way; the diff is
+    // then against the moved shadow, so only revealed rows are new.
+    if (!e.keyframe) {
+        std::vector<std::uint64_t> now(static_cast<std::size_t>(s.height)), was(static_cast<std::size_t>(s.height));
+        for (std::int32_t y = 0; y < s.height; ++y) {
+            now[static_cast<std::size_t>(y)] =
+                hash_row(s.memory.data() + s.offset + static_cast<std::size_t>(y) * static_cast<std::size_t>(s.stride), pitch);
+            was[static_cast<std::size_t>(y)] = hash_row(shadow.pixels.data() + static_cast<std::size_t>(y) * pitch, pitch);
+        }
+        if (auto m = find_move(now, was, s.width)) {
+            e.scroll = m;
+            auto row = [&](std::int32_t y) { return shadow.pixels.data() + static_cast<std::size_t>(y) * pitch; };
+            if (m->dy > 0)
+                for (std::int32_t y = m->y; y < m->y + m->h; ++y) std::memmove(row(y), row(y + m->dy), pitch);
+            else
+                for (std::int32_t y = m->y + m->h - 1; y >= m->y; --y) std::memmove(row(y), row(y + m->dy), pitch);
+        }
+    }
     std::vector<std::byte> raw;
     for (std::uint32_t i = 0; i < g.count(); ++i) {
         const auto r = g.rect(i);

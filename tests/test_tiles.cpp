@@ -149,6 +149,24 @@ TEST(a_scroll_moves_rows_then_paints_the_revealed_tiles) {
     CHECK(!written.empty() && written.front() == (std::array<int, 4>{0, 0, 200, 130}));
 }
 
+TEST(the_encoder_finds_a_scroll_and_sends_only_what_it_reveals) {
+    // A terminal: 300 rows of distinct lines, then everything moves up 20.
+    Pool a{256, 300, 0, 0}, b{256, 300, 0, 0};
+    a.fill(31);
+    for (std::int32_t y = 0; y < 280; ++y) std::memcpy(b.px(0, y), a.px(0, y + 20), 256 * 4);
+    std::mt19937 r{32};
+    for (std::int32_t y = 280; y < 300; ++y)
+        for (std::int32_t x = 0; x < 256 * 4; ++x) b.px(0, y)[x] = static_cast<std::byte>(r());
+    remote::Canvas shadow, canvas;
+    CHECK(remote::apply(canvas, a.w, a.h, wire(*remote::encode(shadow, a.src()))));
+    const auto e = *remote::encode(shadow, b.src());
+    CHECK(e.scroll.has_value() && e.scroll->dy == 20);
+    CHECK(e.tiles.size() <= 8u);  // the bottom row of tiles only (4 across, 64 px band)
+    CHECK(remote::apply(canvas, b.w, b.h, wire(e)));
+    CHECK(canvas.pixels == tight(b));
+    CHECK(shadow.pixels == tight(b));
+}
+
 TEST(a_move_that_does_not_fit_is_refused) {
     Pool p{64, 64, 0, 0};
     p.fill(23);

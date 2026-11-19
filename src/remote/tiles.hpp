@@ -37,9 +37,15 @@ struct Source {
 
 /// The tiles of `src` that differ from `shadow`, encoded, with `shadow`
 /// updated to match. A size change (or an empty shadow) is a keyframe.
+/// A scroll is found and sent as Encoded.scroll (the shadow moved first).
 /// nullopt: `src` does not fit its memory (a client lying about its pool).
 [[nodiscard]] std::optional<link::down::Encoded> encode(Canvas& shadow, const Source& src, std::uint32_t tile = 64,
                                                         int level = 1);
+
+/// A vertical scroll between two frames, from one hash per row: the shift
+/// most changed rows agree on, and the longest run of rows it explains.
+[[nodiscard]] std::optional<link::down::Move> find_move(const std::vector<std::uint64_t>& now,
+                                                        const std::vector<std::uint64_t>& was, std::int32_t width);
 
 /// Apply an update to `canvas` (sized width x height; a keyframe may resize
 /// it). false: malformed (a tile out of range, sizes that do not add up),
