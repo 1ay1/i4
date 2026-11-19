@@ -41,6 +41,21 @@ TEST(one_loss_per_group_is_rebuilt_without_a_round_trip) {
     }
 }
 
+TEST(a_burst_of_consecutive_losses_is_rebuilt) {
+    // Wi-Fi loses in bursts. 27 data fragments in 4 interleaved groups: any
+    // 4 consecutive data fragments fall in 4 different groups.
+    const auto bytes = payload(30000, 8);
+    const auto frags = remote::fragment(0, 1, bytes);
+    for (std::size_t start : {0u, 9u, 23u}) {
+        remote::Reassembly r;
+        std::optional<remote::Reassembly::Frame> got;
+        for (std::size_t i = 0; i < frags.size(); ++i)
+            if (i < start || i >= start + 4)
+                if (auto x = r.add(frags[i])) got = x;
+        CHECK(got && got->bytes == bytes);
+    }
+}
+
 TEST(a_one_fragment_frame_survives_losing_either_copy) {
     const auto bytes = payload(600, 3);  // a keystroke
     const auto frags = remote::fragment(0, 1, bytes);

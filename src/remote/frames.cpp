@@ -23,13 +23,18 @@ std::uint32_t get32(const std::byte* p) {
     return v;
 }
 
+/// The group field's top bit: parity groups are interleaved (fragment i in
+/// group i % groups). A fragment without it is from a build whose groups
+/// were consecutive; its parity would rebuild garbage here, so it is refused.
+constexpr std::uint16_t kInterleaved = 0x8000;
+
 void write_header(std::byte* p, const FragmentHeader& h) {
     put32(p, h.frame);
     put32(p + 4, h.window);
     put16(p + 8, h.index);
     put16(p + 10, h.data_count);
     put32(p + 12, h.total);
-    put16(p + 16, h.group);
+    put16(p + 16, static_cast<std::uint16_t>(h.group | kInterleaved));
     put16(p + 18, h.chunk);
 }
 
@@ -42,6 +47,8 @@ std::optional<FragmentHeader> read_header(std::span<const std::byte> f) {
     h.data_count = get16(f.data() + 10);
     h.total = get32(f.data() + 12);
     h.group = get16(f.data() + 16);
+    if (!(h.group & kInterleaved)) return std::nullopt;
+    h.group = static_cast<std::uint16_t>(h.group & ~kInterleaved);
     h.chunk = get16(f.data() + 18);
     if (h.data_count == 0 || h.group == 0 || h.chunk == 0) return std::nullopt;
     if (static_cast<std::uint64_t>(h.data_count) * h.chunk < h.total) return std::nullopt;
@@ -77,7 +84,11 @@ std::vector<std::vector<std::byte>> fragment(std::uint32_t frame, std::uint32_t 
         h.index = static_cast<std::uint16_t>(i);
         write_header(f.data(), h);
         std::memcpy(f.data() + FragmentHeader::size, bytes.data() + off, n);
-        auto& p = parity[i / group];
+        // Interleaved: fragment i is in group i % groups, so a burst of up to
+        // `groups` consecutive losses (Wi-Fi loses in bursts) costs each
+        // group at most one fragment, and all of them are rebuilt. With
+        // consecutive groups a burst of two already lost the frame.
+        auto& p = parity[i % groups];
         for (std::size_t k = 0; k < n; ++k) p[k] ^= bytes[off + k];
         out.push_back(std::move(f));
     }
@@ -114,17 +125,18 @@ std::optional<Reassembly::Frame> Reassembly::add(std::span<const std::byte> frag
 
 std::optional<Reassembly::Frame> Reassembly::try_complete(Partial& p) {
     const auto& h = p.h;
-    // Rebuild what parity can: one missing data fragment per group.
-    for (std::uint32_t g = 0; g * h.group < h.data_count; ++g) {
-        const std::uint32_t first = g * h.group, last = std::min<std::uint32_t>(h.data_count, first + h.group);
+    // Rebuild what parity can: one missing data fragment per group. Groups
+    // are interleaved (see fragment()): group g is g, g + groups, ...
+    const std::uint32_t groups = (h.data_count + h.group - 1u) / h.group;
+    for (std::uint32_t g = 0; g < groups; ++g) {
         std::uint32_t missing = 0, which = 0;
-        for (auto i = first; i < last; ++i)
+        for (auto i = g; i < h.data_count; i += groups)
             if (!p.pieces.contains(static_cast<std::uint16_t>(i))) ++missing, which = i;
         if (missing != 1) continue;
         auto par = p.pieces.find(static_cast<std::uint16_t>(h.data_count + g));
         if (par == p.pieces.end()) continue;
         std::vector<std::byte> rebuilt = par->second;
-        for (auto i = first; i < last; ++i) {
+        for (auto i = g; i < h.data_count; i += groups) {
             if (i == which) continue;
             const auto& d = p.pieces[static_cast<std::uint16_t>(i)];
             for (std::size_t k = 0; k < d.size(); ++k) rebuilt[k] ^= d[k];

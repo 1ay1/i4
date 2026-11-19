@@ -445,6 +445,21 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
                         if (enc) return;
                     }
                 }
+                // No base to diff against (a first frame, a refresh) for a head
+                // that decodes in software: the whole frame as tiles, a tile
+                // keyframe, read off the GPU. Not a video keyframe it would
+                // spend ~55 ms decoding (and that, at ~600 KB, risks being lost
+                // again on Wi-Fi).
+                if (!flags && !h.video_hw) {
+                    const auto r = remote::runs(buf.width, buf.height, {{0, 0, buf.width, buf.height}});
+                    constexpr std::uint32_t ar24 = 0x34325241, ab24 = 0x34324241;
+                    if (auto px = encoder_.read(f, r.rects))
+                        enc = remote::pack(r, *px, buf.fourcc == ar24 || buf.fourcc == ab24);
+                    if (enc) {
+                        enc->keyframe = true;
+                        return;
+                    }
+                }
                 // Most of it changed (or a first frame): video, on NVENC.
                 video = encoder_.encode(*stream, f);
                 return;
@@ -492,6 +507,20 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
         emit(ev::HeadSaid{id, link::up::Shown{window, gen}});
         return;
     }
+    // I4D_VERIFY on the CPU tile path: the shadow is exactly what the head
+    // should now hold (B,G,R per pixel; see I4_HEAD_VERIFY).
+    if (static const bool verify = std::getenv("I4D_VERIFY") != nullptr; verify)
+        if (auto sh = h.shadow.find(window); sh != h.shadow.end() && !sh->second.pixels.empty()) {
+            std::uint64_t hash = 1469598103934665603ull;
+            const auto& px = sh->second.pixels;
+            for (std::size_t i = 0; i + 3 < px.size(); i += 4)
+                for (std::size_t k = 0; k < 3; ++k) {
+                    hash ^= std::to_integer<std::uint8_t>(px[i + k]);
+                    hash *= 1099511628211ull;
+                }
+            std::fprintf(stderr, "i4d: verify window %u gen %llu %016llx\n", window.value,
+                         static_cast<unsigned long long>(gen), static_cast<unsigned long long>(hash));
+        }
     if (static const bool trace = std::getenv("I4D_TRACE") != nullptr; trace)
         std::fprintf(stderr, "i4d: remote encode %dx%d  %zu tiles  %zu bytes  %.3f ms\n", c.size.width, c.size.height,
                      enc->tiles.size(), enc->data.size(),
