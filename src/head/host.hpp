@@ -266,6 +266,7 @@ private:
     /// stream. Wired only where the platform has it; elsewhere the program
     /// falls back to mayag's events.
     void tap() {
+#if (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
         if constexpr (requires { native_.set_raw_input([](const mayag::platform::RawInput&) {}); }) {
             // The head's own events do not start the photon clock: what
             // counts is when a CLIENT's answer to a key reaches the glass.
@@ -317,6 +318,7 @@ private:
                     in);
             });
         }
+#endif
     }
 
     /// What the window sees as its context: its own event type, routed into
