@@ -115,6 +115,50 @@ TEST(malformed_updates_leave_the_canvas_alone) {
     CHECK(canvas.pixels == before || canvas.pixels.size() == before.size());
 }
 
+TEST(a_scroll_moves_rows_then_paints_the_revealed_tiles) {
+    // A terminal printing: everything moves up 20 rows, a new line appears at
+    // the bottom. The head holds frame A; it gets a move + the bottom tiles.
+    Pool a{200, 150, 0, 0}, b{200, 150, 0, 0};
+    a.fill(21);
+    for (std::int32_t y = 0; y < 130; ++y) std::memcpy(b.px(0, y), a.px(0, y + 20), 200 * 4);
+    std::mt19937 r{22};
+    for (std::int32_t y = 130; y < 150; ++y)
+        for (std::int32_t x = 0; x < 200 * 4; ++x) b.px(0, y)[x] = static_cast<std::byte>(r());
+    remote::Canvas shadow, canvas;
+    const auto key = *remote::encode(shadow, a.src());
+    CHECK(remote::apply(canvas, a.w, a.h, key));
+    std::vector<std::uint8_t> rgba;
+    std::vector<std::array<int, 4>> written;
+    CHECK(remote::apply_rgba(rgba, a.w, a.h, wire(key), written));
+    // The update: move rows 0..130 from +20, then the tiles of rows 128..150.
+    const auto runs = remote::runs(b.w, b.h, {{0, 128, 200, 22}});
+    std::vector<std::byte> px;
+    for (const auto& run : runs.rects)
+        for (std::int32_t y = run[1]; y < run[1] + run[3]; ++y)
+            px.insert(px.end(), b.px(run[0], y), b.px(run[0], y) + run[2] * 4);
+    auto e = *remote::pack(runs, px, true);
+    e.scroll = link::down::Move{0, 0, 200, 130, 20};
+    CHECK(remote::apply(canvas, b.w, b.h, wire(e)));
+    CHECK(canvas.pixels == tight(b));
+    // The straight-RGBA path ends up with frame B too.
+    written.clear();
+    CHECK(remote::apply_rgba(rgba, b.w, b.h, wire(e), written));
+    remote::Canvas s3, want;
+    CHECK(remote::apply(want, b.w, b.h, *remote::encode(s3, b.src()), true));
+    CHECK(want.pixels.size() == rgba.size() && std::memcmp(rgba.data(), want.pixels.data(), rgba.size()) == 0);
+    CHECK(!written.empty() && written.front() == (std::array<int, 4>{0, 0, 200, 130}));
+}
+
+TEST(a_move_that_does_not_fit_is_refused) {
+    Pool p{64, 64, 0, 0};
+    p.fill(23);
+    remote::Canvas shadow, canvas;
+    CHECK(remote::apply(canvas, p.w, p.h, *remote::encode(shadow, p.src())));
+    auto e = *remote::encode(shadow, p.src());
+    e.scroll = link::down::Move{0, 10, 64, 50, 10};  // reads rows 20..70: past the bottom
+    CHECK(!remote::apply(canvas, p.w, p.h, e));
+}
+
 TEST(straight_rgba_for_a_renderer) {
     Pool p{2, 1, 0, 0};
     // B, G, R, A: opaque red; half-transparent premultiplied white.

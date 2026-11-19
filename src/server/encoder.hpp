@@ -60,11 +60,23 @@ public:
     [[nodiscard]] StreamPtr stream();
     /// One frame of `s`; nullopt if it could not be imported or encoded.
     [[nodiscard]] std::optional<link::down::Video> encode(Stream& s, const DmabufFrame& f, bool keyframe = false);
-    /// Which 64 px tiles of `f` differ from what `s` last saw (one byte per
-    /// tile, row-major; computed on the GPU, a few hundred bytes read back),
-    /// and remember `f` for next time. nullopt: no earlier frame of this
-    /// size, so everything changed.
-    [[nodiscard]] std::optional<std::vector<std::uint8_t>> changes(Stream& s, const DmabufFrame& f);
+    /// What changed in `f` since `s` last saw a frame, found on the GPU: a
+    /// 64-bit hash per 64 px row segment, compared on the CPU with the last
+    /// frame's. Also finds a scrolled region (a terminal printing, a page
+    /// scrolling): rows that are an earlier frame's rows moved by dy.
+    struct Scroll {
+        std::int32_t x, y, w, h, dy;  // rows y..y+h of cols x..x+w now hold what was at row + dy
+    };
+    struct Changes {
+        /// One byte per 64 px tile, row-major: changed (after `scroll`).
+        std::vector<std::uint8_t> tiles;
+        std::optional<Scroll> scroll;
+        /// No earlier frame of this size: every tile is set (a keyframe).
+        bool fresh = false;
+    };
+    /// Also stages `f` so read() of the same frame does not copy it again.
+    /// nullopt: could not import.
+    [[nodiscard]] std::optional<Changes> changes(Stream& s, const DmabufFrame& f);
     /// The client destroyed this buffer: drop its import.
     void forget(std::uint64_t buffer);
     /// The head lost a frame of this stream: the next frame is a keyframe

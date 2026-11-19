@@ -357,6 +357,11 @@ public:
                                  static_cast<unsigned long long>(c->generation), static_cast<unsigned long long>(hash));
                 }
             }
+            if (c && probe_sent_ && !probe_answered_) {
+                probe_answered_ = true;
+                std::fprintf(stderr, "i4-head: probe key->frame %.2f ms\n",
+                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - *probe_sent_).count());
+            }
             // The client answered: the next frame drawn shows it, and its
             // presentation closes the key's input-to-photon measurement.
             if (answer_due_ && std::holds_alternative<link::down::Content>(h.message)) {
@@ -389,6 +394,7 @@ public:
         }
         const bool want = link_.wants_write();
         udp_hello();
+        probe();
         if (udp_) check_losses();
         if (reg_ && want != writing_ && reg_->modify(want ? jaal::interest::read_write : jaal::interest::read))
             writing_ = want;
@@ -460,6 +466,28 @@ public:
             if (key_down_at_ && (!answer_due_ || *key_down_at_ < *answer_due_)) answer_due_ = key_down_at_;
         }
         (void)link_.send(link::encode(s.message));
+    }
+
+    /// I4_HEAD_PROBE=MS: every MS ms, type 'a' (press + release) into the
+    /// focused window as if from the keyboard, and time the answer: until
+    /// its frame arrives here (key->frame), and until that frame is on the
+    /// glass (key->photon, from the presented handler). The whole remote
+    /// loop, measured without hands. Run `cat` in a terminal to answer.
+    void probe() {
+        static const int every = [] {
+            const char* p = std::getenv("I4_HEAD_PROBE");
+            return p && *p ? std::atoi(p) : 0;
+        }();
+        if (every <= 0) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (probe_sent_ && now - *probe_sent_ < std::chrono::milliseconds(every)) return;
+        if (probe_sent_ && !probe_answered_) std::fprintf(stderr, "i4-head: probe unanswered\n");
+        constexpr std::uint32_t kKeyA = 30;
+        (void)link_.send(link::encode(link::Up{link::up::Key{kKeyA, true, {}}}));
+        (void)link_.send(link::encode(link::Up{link::up::Key{kKeyA, false, {}}}));
+        probe_sent_ = now;
+        probe_answered_ = false;
+        answer_due_ = std::chrono::duration<double>(now.time_since_epoch()).count();
     }
 
     [[nodiscard]] Window& window() { return window_; }
@@ -689,6 +717,8 @@ private:
     bool trace_ = std::getenv("I4_HEAD_TRACE") != nullptr;
     std::optional<std::chrono::steady_clock::time_point> last_key_;
     std::optional<double> key_down_at_;  // the newest key press, kernel time (s)
+    std::optional<std::chrono::steady_clock::time_point> probe_sent_;  // I4_HEAD_PROBE
+    bool probe_answered_ = true;
     std::optional<double> answer_due_;   // the oldest press sent to a client and not yet answered
     std::vector<double> photon_;          // key -> photon samples (ms)
     struct Imported {

@@ -118,6 +118,22 @@ void to_rgba(std::uint8_t* o, const std::uint8_t* in, std::int32_t n, bool alpha
     }
 }
 
+/// Rows of `px` (width x height, 4 bytes a pixel) moved as `m` says, in
+/// place: overlap-safe (rows walk away from where they read). false: the
+/// move does not fit the picture.
+bool move_rows(std::uint8_t* px, std::int32_t width, std::int32_t height, const link::down::Move& m) {
+    if (m.w <= 0 || m.h <= 0 || m.x < 0 || m.y < 0 || m.x + m.w > width || m.y + m.h > height) return false;
+    if (m.y + m.dy < 0 || m.y + m.h + m.dy > height) return false;
+    const auto pitch = static_cast<std::size_t>(width) * 4;
+    const auto bytes = static_cast<std::size_t>(m.w) * 4;
+    auto row = [&](std::int32_t y) { return px + static_cast<std::size_t>(y) * pitch + static_cast<std::size_t>(m.x) * 4; };
+    if (m.dy > 0)  // content moved up: read below, so walk down
+        for (std::int32_t y = m.y; y < m.y + m.h; ++y) std::memmove(row(y), row(y + m.dy), bytes);
+    else if (m.dy < 0)
+        for (std::int32_t y = m.y + m.h - 1; y >= m.y; --y) std::memmove(row(y), row(y + m.dy), bytes);
+    return true;
+}
+
 }  // namespace
 
 bool apply(Canvas& c, std::int32_t width, std::int32_t height, const link::down::Encoded& e, bool rgba) {
@@ -130,6 +146,7 @@ bool apply(Canvas& c, std::int32_t width, std::int32_t height, const link::down:
         c.height = height;
         c.pixels.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4);
     }
+    if (e.scroll && !move_rows(reinterpret_cast<std::uint8_t*>(c.pixels.data()), width, height, *e.scroll)) return false;
     const auto pitch = static_cast<std::size_t>(width) * 4;
     std::size_t at = 0;
     for (auto i : e.tiles) {
@@ -155,6 +172,10 @@ bool apply_rgba(std::vector<std::uint8_t>& rgba, std::int32_t width, std::int32_
     const auto raw = unpack(width, height, e);
     if (!raw) return false;
     rgba.resize(size);
+    if (e.scroll) {
+        if (!move_rows(rgba.data(), width, height, *e.scroll)) return false;
+        written.push_back({e.scroll->x, e.scroll->y, e.scroll->w, e.scroll->h});
+    }
     const Grid g{width, height, e.tile};
     const auto pitch = static_cast<std::size_t>(width) * 4;
     std::size_t at = 0;

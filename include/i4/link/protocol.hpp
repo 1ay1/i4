@@ -227,10 +227,19 @@ struct DmabufLayout {
 /// its rows tight (edge tiles are narrower/shorter), as 32-bit little-endian
 /// B,G,R,A words like ShmLayout. `keyframe`: every tile is listed and the
 /// head need not have seen any earlier frame (a new head, a resize).
+/// Rows the head already has, moved: rows y..y+h (columns x..x+w) take what
+/// was at row + dy before this frame. A terminal printing a line, a page
+/// scrolling: the head moves its own pixels, and only the newly revealed
+/// rows travel as tiles. Applied BEFORE the tiles.
+struct Move {
+    std::int32_t x = 0, y = 0, w = 0, h = 0, dy = 0;
+    friend bool operator==(const Move&, const Move&) = default;
+};
 struct Encoded {
     std::uint32_t tile = 64;
     bool alpha = true;
     bool keyframe = true;
+    std::optional<Move> scroll;
     std::vector<std::uint32_t> tiles;
     std::uint32_t raw_size = 0;  // decompressed bytes
     std::string data;            // zstd

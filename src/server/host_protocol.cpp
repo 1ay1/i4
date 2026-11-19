@@ -4,6 +4,9 @@
 // handlers at the bottom are the reverse: the Session decided, this says it
 // to a client.
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <limits>
@@ -346,6 +349,10 @@ void Host::show(Surface& s, std::optional<id_t> buffer, std::optional<SyncPoint>
         auto& h = s.held[*buffer];
         h.generation = t.generation;
         if (release) h.release.push_back(std::move(*release));
+        if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr)
+            std::fprintf(stderr, "i4d: t=%.3f commit window %u gen %llu\n",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                         w.value, static_cast<unsigned long long>(t.generation));
         emit(ev::Committed{w, t.generation});
         return;
     }
@@ -644,6 +651,10 @@ void Host::send_keymap(srv::Client& c, id_t keyboard, std::uint32_t version) {
 }
 
 void Host::handle(const fx::Key& e) {
+    if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr && e.pressed)
+        std::fprintf(stderr, "i4d: t=%.3f key %u in\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                     e.code);
     // A head without exact xkb state: its coarse Mods become masks in the
     // session's keymap, sent when they change.
     const bool mods_changed = !xkb_mods_ && e.mods != mods_;
@@ -752,6 +763,10 @@ void Host::handle(const fx::Button& e) {
 }
 
 void Host::handle(const fx::FramesDone& e) {
+    if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr)
+        std::fprintf(stderr, "i4d: t=%.3f frames done window %u gen %llu\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                     e.window.value, static_cast<unsigned long long>(e.generation));
     auto* s = surface(e.window);
     if (!s) return;
     const auto end = s->owed.upper_bound(e.generation);

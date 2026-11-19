@@ -326,6 +326,10 @@ std::size_t file_size(int fd) {
 }  // namespace
 
 bool Host::send_frame(HeadConn& h, wm::WindowId window, const std::vector<std::byte>& bytes) {
+    if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr)
+        std::fprintf(stderr, "i4d: t=%.3f sent window %u %zu bytes\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                     window.value, bytes.size());
     if (!h.udp || !h.udp_peer || !udp_) return static_cast<bool>(h.channel.send(bytes));
     // A datagram the kernel has no room for is a lost frame, not a dead
     // head: the head notices and asks for a refresh.
@@ -397,9 +401,11 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
                 auto& stream = h.streams[window];
                 if (!stream) stream = encoder_.stream();
                 c.size = {buf.width, buf.height};
-                // Which tiles really changed: compared on the GPU against the
-                // last frame this head got (clients often damage everything).
-                const auto flags = encoder_.changes(*stream, f);
+                // What changed since the last frame this head got: per-row
+                // hashes on the GPU, compared here (clients often damage
+                // everything), with a scroll found where rows only moved.
+                const auto ch = encoder_.changes(*stream, f);
+                const auto t_changes = std::chrono::steady_clock::now();
                 // I4D_VERIFY=1: hash the whole frame as read off the GPU (B,G,R
                 // of each pixel), to compare with what the head ends up holding
                 // (I4_HEAD_VERIFY). Costs a full readback: debugging only.
@@ -417,53 +423,54 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
                 }
                 if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr) {
                     std::size_t n = 0;
-                    if (flags) for (auto x : *flags) n += x;
-                    std::fprintf(stderr, "i4d: gpu diff %s %zu of %zu tiles\n", flags ? "ok" : "none", n,
-                                 flags ? flags->size() : 0);
+                    if (ch) for (auto x : ch->tiles) n += x;
+                    std::fprintf(stderr, "i4d: gpu diff %s %zu of %zu tiles%s\n", ch ? "ok" : "none", n,
+                                 ch ? ch->tiles.size() : 0, ch && ch->scroll ? "  + scroll" : "");
                 }
-                if (flags) {
+                if (ch) {
                     std::vector<std::array<std::int32_t, 4>> changed;
                     const int cols = (buf.width + 63) / 64;
-                    for (std::size_t i = 0; i < flags->size(); ++i)
-                        if ((*flags)[i])
+                    for (std::size_t i = 0; i < ch->tiles.size(); ++i)
+                        if (ch->tiles[i])
                             changed.push_back({static_cast<std::int32_t>(i % cols) * 64,
                                                static_cast<std::int32_t>(i / cols) * 64, 64, 64});
-                    // Few tiles (typing, a cursor blink, a hover): just those,
-                    // read off the GPU, lossless; the head pastes a few KB and
-                    // decodes nothing.
                     const auto r = remote::runs(buf.width, buf.height, changed);
-                    if (r.tiles.empty()) {
+                    if (r.tiles.empty() && !ch->scroll) {
                         nothing_changed = true;
                         return;
                     }
                     const auto total = static_cast<std::uint64_t>(buf.width) * static_cast<std::uint64_t>(buf.height);
-                    // A head without a hardware decoder gets tiles for ANY
-                    // change: read off this GPU and zstd'd, ~5 ms both ends,
-                    // where it would spend ~50 ms decoding HEVC in software.
-                    if (r.area * 4 < total || !h.video_hw) {
+                    // Lossless tiles (and a move) unless most of the window is
+                    // new and the head decodes video in hardware: then NVENC.
+                    // A software decoder (an M1 on 4:4:4) always gets tiles.
+                    if (ch->fresh || r.area * 4 < total || !h.video_hw) {
                         constexpr std::uint32_t ar24 = 0x34325241, ab24 = 0x34324241;
-                        if (auto px = encoder_.read(f, r.rects))
+                        if (r.tiles.empty()) {
+                            enc = link::down::Encoded{};
+                            enc->keyframe = false;
+                            enc->alpha = buf.fourcc == ar24 || buf.fourcc == ab24;
+                        } else if (auto px = encoder_.read(f, r.rects)) {
+                            const auto t_read = std::chrono::steady_clock::now();
                             enc = remote::pack(r, *px, buf.fourcc == ar24 || buf.fourcc == ab24);
-                        if (enc) return;
+                            if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr) {
+                                auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+                                std::fprintf(stderr, "i4d: split changes %.3f  read %.3f  pack %.3f ms  (%zu rects)\n",
+                                             ms(t_changes - t0), ms(t_read - t_changes),
+                                             ms(std::chrono::steady_clock::now() - t_read), r.rects.size());
+                            }
+                        }
+                        if (enc) {
+                            enc->keyframe = ch->fresh;
+                            if (ch->scroll)
+                                enc->scroll = link::down::Move{ch->scroll->x, ch->scroll->y, ch->scroll->w,
+                                                               ch->scroll->h, ch->scroll->dy};
+                            if (!ch->fresh || !h.video_hw) return;
+                            enc.reset();  // a first frame for a hardware decoder: video below
+                        }
                     }
                 }
-                // No base to diff against (a first frame, a refresh) for a head
-                // that decodes in software: the whole frame as tiles, a tile
-                // keyframe, read off the GPU. Not a video keyframe it would
-                // spend ~55 ms decoding (and that, at ~600 KB, risks being lost
-                // again on Wi-Fi).
-                if (!flags && !h.video_hw) {
-                    const auto r = remote::runs(buf.width, buf.height, {{0, 0, buf.width, buf.height}});
-                    constexpr std::uint32_t ar24 = 0x34325241, ab24 = 0x34324241;
-                    if (auto px = encoder_.read(f, r.rects))
-                        enc = remote::pack(r, *px, buf.fourcc == ar24 || buf.fourcc == ab24);
-                    if (enc) {
-                        enc->keyframe = true;
-                        return;
-                    }
-                }
-                // Most of it changed (or a first frame): video, on NVENC.
-                video = encoder_.encode(*stream, f);
+                // Most of it changed: video, on NVENC.
+                video = encoder_.encode(*stream, f, ch && ch->fresh);
                 return;
             }
             // A LINEAR single-plane 8888 buffer reads straight from the CPU:
