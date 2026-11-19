@@ -1,0 +1,3 @@
+[submodule "third_party/mayag"]
+	path = third_party/mayag
+	url = git@github.com:1ay1/mayag.git

@@ -1,0 +1,27 @@
+# tests/ — behaviour, randomized invariants, and what must NOT compile.
+
+function(i4_test name)
+    add_executable(${name} ${name}.cpp)
+    target_link_libraries(${name} PRIVATE i4::wm i4_warnings)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+i4_test(test_parse)
+i4_test(test_wm)
+i4_test(test_arrange)
+i4_test(test_determinism)
+
+# Compile-fail: each file in fail/ must compile as written and must NOT
+# compile with -DI4_FAIL. The positive control stops a typo or a missing
+# include from passing as "it failed to compile, as intended".
+file(GLOB fail_sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fail/*.cpp)
+foreach(src IN LISTS fail_sources)
+    get_filename_component(name ${src} NAME_WE)
+    set(compile ${CMAKE_CXX_COMPILER} -std=c++26 -fsyntax-only -I${PROJECT_SOURCE_DIR}/include ${src})
+    add_test(NAME compiles_${name} COMMAND ${compile})
+    add_test(NAME refuses_${name} COMMAND ${compile} -DI4_FAIL)
+    set_tests_properties(refuses_${name} PROPERTIES WILL_FAIL TRUE)
+endforeach()
+
+add_test(NAME layering
+         COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR} -P ${PROJECT_SOURCE_DIR}/cmake/layering.cmake)
