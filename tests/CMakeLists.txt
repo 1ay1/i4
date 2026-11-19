@@ -14,6 +14,11 @@ i4_test(test_wire)
 i4_test(test_replica)
 i4_test(test_bindings)
 
+add_executable(test_session test_session.cpp)
+target_link_libraries(test_session PRIVATE i4_session i4_warnings)
+target_include_directories(test_session PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_session COMMAND test_session)
+
 # Compile-fail: each file in fail/ must compile as written and must NOT
 # compile with -DI4_FAIL. The positive control stops a typo or a missing
 # include from passing as "it failed to compile, as intended".
@@ -32,3 +37,5 @@ add_test(NAME layering
 if(TARGET i4-preview)
     add_test(NAME preview_headless COMMAND i4-preview --headless)
 endif()
+
+add_subdirectory(wl)

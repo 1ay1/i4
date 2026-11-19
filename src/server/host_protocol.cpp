@@ -1,0 +1,514 @@
+// src/server/host_protocol.cpp — the Wayland objects, on i4::wl.
+//
+// Handlers only record what clients say, or emit an Event. The effect
+// handlers at the bottom are the reverse: the Session decided, this says it
+// to a client.
+#include <algorithm>
+#include <ctime>
+
+#include "host.hpp"
+#include "i4/base/match.hpp"
+
+namespace i4::server {
+
+using namespace i4::wl;
+using namespace i4::wl::proto;
+namespace wire = i4::wl::wire;
+
+namespace {
+
+// wl_display and wl_registry belong to the core: i4::wl installs none.
+constexpr std::uint32_t display_sync = 0;
+constexpr std::uint32_t display_get_registry = 1;
+constexpr std::uint32_t registry_bind = 0;
+
+constexpr std::uint32_t compositor_version = 6;
+constexpr std::uint32_t xdg_version = 6;
+constexpr std::uint32_t seat_version = 9;
+
+std::uint32_t now_ms() {
+    timespec ts{};
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<std::uint32_t>(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+template <class I>
+NonNull<I> nonnull(id_t id) {
+    return NonNull<I>::unchecked(Ref<I>{id});
+}
+
+}  // namespace
+
+std::vector<id_t> commit(Current& current, Pending& pending) {
+    if (pending.attach) current.buffer = *pending.attach;
+    auto frames = std::move(pending.frames);
+    pending = Pending{};
+    return frames;
+}
+
+Surface* Host::surface(srv::Client* c, id_t id) {
+    auto it = surfaces_.find({c, id});
+    return it == surfaces_.end() ? nullptr : it->second.get();
+}
+
+Surface* Host::surface(wm::WindowId w) {
+    auto it = windows_.find(w);
+    return it == windows_.end() ? nullptr : surface(it->second.first, it->second.second);
+}
+
+void Host::answer_frames(srv::Client& c, const std::vector<id_t>& frames, std::uint32_t time) {
+    for (auto cb : frames) {
+        {
+            auto ev = c.event(cb, 0);  // wl_callback.done
+            ev.encoder().put_u32(time);
+        }
+        c.send_delete_id(cb);
+    }
+}
+
+// -- every client starts here --------------------------------------------------------
+
+void Host::greet(srv::Client& client) {
+    client.on_destroy([this](srv::Client& c) { forget(c); });
+    client.add_object(
+        1,
+        [this, &client](std::uint32_t opcode, wire::Decoder& d) {
+            if (opcode == display_sync) {
+                const id_t cb = d.get_u32();
+                if (!d.bad) answer_frames(client, {cb}, display_.next_serial());
+            } else if (opcode == display_get_registry) {
+                const id_t reg = d.get_u32();
+                if (d.bad) return;
+                client.add_object(
+                    reg,
+                    [this, &client](std::uint32_t op, wire::Decoder& rd) {
+                        if (op != registry_bind) return;
+                        const std::uint32_t name = rd.get_u32();
+                        const std::string_view iface = rd.get_string();
+                        const std::uint32_t ver = rd.get_u32();
+                        const id_t nid = rd.get_u32();
+                        if (!rd.bad) display_.handle_bind(client, name, iface, ver, nid);
+                    },
+                    {});
+                display_.send_globals_to(client, reg);
+            }
+        },
+        {});
+}
+
+void Host::publish_globals() {
+    auto global = [this]<class I>(std::type_identity<I>, std::uint32_t v, void (Host::*bind)(srv::Client&, std::uint32_t, id_t)) {
+        display_.add_global<I>(v, [this, bind](srv::Client& c, std::uint32_t ver, id_t id) { (this->*bind)(c, ver, id); });
+    };
+    global(std::type_identity<wl_compositor>{}, compositor_version, &Host::bind_compositor);
+    global(std::type_identity<wl_shm>{}, 2, &Host::bind_shm);
+    global(std::type_identity<xdg_wm_base>{}, xdg_version, &Host::bind_xdg);
+    global(std::type_identity<wl_seat>{}, seat_version, &Host::bind_seat);
+    global(std::type_identity<wl_output>{}, 4, &Host::bind_output);
+    global(std::type_identity<wl_subcompositor>{}, 1, &Host::bind_subcompositor);
+    global(std::type_identity<zxdg_decoration_manager_v1>{}, 1, &Host::bind_decoration);
+}
+
+void Host::destroyed(Surface& s) {
+    if (keyboard_focus_ == &s) keyboard_focus_ = nullptr;
+    if (pointer_focus_ == &s) pointer_focus_ = nullptr;
+    if (s.toplevel)
+        if (const auto* m = std::get_if<life::Mapped>(&s.toplevel->life)) {
+            windows_.erase(m->window);
+            emit(ev::Unmapped{m->window});
+        }
+}
+
+void Host::forget(srv::Client& c) {
+    for (auto it = surfaces_.begin(); it != surfaces_.end();) {
+        if (it->first.first != &c) {
+            ++it;
+            continue;
+        }
+        destroyed(*it->second);
+        it = surfaces_.erase(it);
+    }
+    std::erase_if(buffers_, [&](const auto& kv) { return kv.first.first == &c; });
+    seats_.erase(&c);
+}
+
+// -- wl_compositor, wl_surface, wl_region -----------------------------------------------
+
+void Host::bind_compositor(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<wl_compositor>>();
+
+    l->on<wl_compositor::requests::create_surface>([this, &client](srv::NewObject<wl_surface> s) {
+        auto& surf = surfaces_[{&client, s.id()}];
+        surf = std::make_unique<Surface>();
+        surf->client = &client;
+        surf->id = s.id();
+
+        auto sl = std::make_shared<srv::RequestListener<wl_surface>>();
+        const auto sid = s.id();
+        sl->on<wl_surface::requests::attach>([this, &client, sid](Ref<wl_buffer> b, std::int32_t, std::int32_t) {
+            if (auto* x = surface(&client, sid)) x->pending.attach = b ? std::optional<id_t>{b.id} : std::nullopt;
+        });
+        sl->on<wl_surface::requests::frame>([this, &client, sid](srv::NewObject<wl_callback> cb) {
+            if (auto* x = surface(&client, sid)) x->pending.frames.push_back(cb.id());
+        });
+        sl->on<wl_surface::requests::commit>([this, &client, sid] {
+            if (auto* x = surface(&client, sid)) committed(*x);
+        });
+        sl->on<wl_surface::requests::destroy>([this, &client, sid] {
+            auto it = surfaces_.find({&client, sid});
+            if (it == surfaces_.end()) return;
+            destroyed(*it->second);
+            surfaces_.erase(it);
+        });
+        // Accepted; i4 composites whole buffers at scale 1 for now.
+        sl->on<wl_surface::requests::damage>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
+        sl->on<wl_surface::requests::damage_buffer>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
+        sl->on<wl_surface::requests::set_opaque_region>([](Ref<wl_region>) {});
+        sl->on<wl_surface::requests::set_input_region>([](Ref<wl_region>) {});
+        sl->on<wl_surface::requests::set_buffer_scale>([](std::int32_t) {});
+        sl->on<wl_surface::requests::set_buffer_transform>([](wl_output_transform) {});
+        sl->on<wl_surface::requests::offset>([](std::int32_t, std::int32_t) {});
+        s.bind<compositor_version>(sl);
+    });
+
+    l->on<wl_compositor::requests::create_region>([](srv::NewObject<wl_region> r) {
+        auto rl = std::make_shared<srv::RequestListener<wl_region>>();
+        rl->on<wl_region::requests::add>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
+        rl->on<wl_region::requests::subtract>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
+        rl->on<wl_region::requests::destroy>([] {});
+        r.bind<1>(rl);
+    });
+
+    client.bind_resource<wl_compositor, compositor_version>(id, l, version);
+}
+
+void Host::committed(Surface& s) {
+    const auto frames = commit(s.current, s.pending);
+
+    if (!s.toplevel) {
+        // Not a window (subsurface, popup, cursor): nothing shows it yet, so
+        // its frames are answered now and the client keeps going.
+        answer_frames(*s.client, frames, now_ms());
+        return;
+    }
+    auto& t = *s.toplevel;
+    // A toplevel's first commit asks to be configured: to i4 that is the
+    // window appearing. Its size is the window manager's to give.
+    if (is<life::Unmapped>(t.life)) {
+        const wm::WindowId w{next_window_++};
+        t.life = life::Mapped{w};
+        windows_[w] = {s.client, s.id};
+        emit(ev::Mapped{w, t.info});
+    }
+    const auto w = std::get<life::Mapped>(t.life).window;
+
+    if (s.current.buffer && buffers_.contains({s.client, *s.current.buffer})) {
+        ++t.generation;
+        for (auto cb : frames) s.owed.emplace(t.generation, cb);
+        // The head maps the pool; the buffer object is the client's again.
+        srv::Resource<wl_buffer, 1>{s.client, *s.current.buffer}.send<wl_buffer::events::release>();
+        emit(ev::Committed{w, t.generation});
+        return;
+    }
+    answer_frames(*s.client, frames, now_ms());
+}
+
+// -- wl_shm --------------------------------------------------------------------------
+
+void Host::bind_shm(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<wl_shm>>();
+
+    l->on<wl_shm::requests::create_pool>([this, &client](srv::NewObject<wl_shm_pool> p, BorrowedFd fd, std::int32_t) {
+        // It came by SCM_RIGHTS and is ours to close: own it at once.
+        auto pool = std::make_shared<Pool>(Pool{OwnedFd{fd.get()}});
+        auto pl = std::make_shared<srv::RequestListener<wl_shm_pool>>();
+        pl->on<wl_shm_pool::requests::create_buffer>(
+            [this, &client, pool](srv::NewObject<wl_buffer> b, std::int32_t offset, std::int32_t w, std::int32_t h,
+                                  std::int32_t stride, wl_shm_format format) {
+                buffers_[{&client, b.id()}] = ShmBuffer{pool, offset, w, h, stride, format};
+                auto bl = std::make_shared<srv::RequestListener<wl_buffer>>();
+                bl->on<wl_buffer::requests::destroy>([this, &client, bid = b.id()] { buffers_.erase({&client, bid}); });
+                b.bind<1>(bl);
+            });
+        pl->on<wl_shm_pool::requests::resize>([](std::int32_t) {});  // the fd is the same; heads map its size
+        pl->on<wl_shm_pool::requests::destroy>([] {});                 // buffers keep the pool alive
+        p.bind<1>(pl);
+    });
+
+    auto shm = client.bind_resource<wl_shm, 2>(id, l, version);
+    shm.send<wl_shm::events::format>(wl_shm::format::argb8888);
+    shm.send<wl_shm::events::format>(wl_shm::format::xrgb8888);
+}
+
+// -- xdg-shell -------------------------------------------------------------------------
+
+void Host::bind_xdg(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<xdg_wm_base>>();
+
+    l->on<xdg_wm_base::requests::create_positioner>([](srv::NewObject<xdg_positioner> p) {
+        auto pl = std::make_shared<srv::RequestListener<xdg_positioner>>();
+        pl->on<xdg_positioner::requests::destroy>([] {});
+        pl->on<xdg_positioner::requests::set_size>([](std::int32_t, std::int32_t) {});
+        pl->on<xdg_positioner::requests::set_anchor_rect>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
+        pl->on<xdg_positioner::requests::set_anchor>([](xdg_positioner_anchor) {});
+        pl->on<xdg_positioner::requests::set_gravity>([](xdg_positioner_gravity) {});
+        pl->on<xdg_positioner::requests::set_constraint_adjustment>([](xdg_positioner_constraint_adjustment) {});
+        pl->on<xdg_positioner::requests::set_offset>([](std::int32_t, std::int32_t) {});
+        pl->on<xdg_positioner::requests::set_reactive>([] {});
+        pl->on<xdg_positioner::requests::set_parent_size>([](std::int32_t, std::int32_t) {});
+        pl->on<xdg_positioner::requests::set_parent_configure>([](std::uint32_t) {});
+        p.bind<xdg_version>(pl);
+    });
+
+    l->on<xdg_wm_base::requests::get_xdg_surface>([this, &client, version](srv::NewObject<xdg_surface> xs, Ref<wl_surface> ws) {
+        const id_t sid = ws.id;
+        const id_t xsid = xs.id();
+        auto xl = std::make_shared<srv::RequestListener<xdg_surface>>();
+
+        xl->on<xdg_surface::requests::get_toplevel>([this, &client, sid, xsid, version](srv::NewObject<xdg_toplevel> t) {
+            auto* s = surface(&client, sid);
+            if (!s) return;
+            s->toplevel.emplace();
+            s->toplevel->xdg_surface = xsid;
+            s->toplevel->xdg_toplevel = t.id();
+            s->toplevel->version = version;
+
+            // A change to what the window manager knows about the window.
+            auto changed = [this, &client, sid](auto&& edit) {
+                auto* x = surface(&client, sid);
+                if (!x || !x->toplevel) return;
+                edit(x->toplevel->info);
+                if (const auto* m = std::get_if<life::Mapped>(&x->toplevel->life))
+                    emit(ev::Retitled{m->window, x->toplevel->info});
+            };
+            auto tl = std::make_shared<srv::RequestListener<xdg_toplevel>>();
+            tl->on<xdg_toplevel::requests::set_title>(
+                [changed](std::string_view v) { changed([&](wm::WindowInfo& i) { i.title = std::string(v); }); });
+            tl->on<xdg_toplevel::requests::set_app_id>(
+                [changed](std::string_view v) { changed([&](wm::WindowInfo& i) { i.app_id = std::string(v); }); });
+            // A transient (a dialog) floats, as in i3.
+            tl->on<xdg_toplevel::requests::set_parent>(
+                [changed](Ref<xdg_toplevel> p) { changed([&](wm::WindowInfo& i) { i.floating = bool(p); }); });
+            tl->on<xdg_toplevel::requests::set_min_size>([](std::int32_t, std::int32_t) {});
+            tl->on<xdg_toplevel::requests::set_max_size>([](std::int32_t, std::int32_t) {});
+            tl->on<xdg_toplevel::requests::set_maximized>([] {});
+            tl->on<xdg_toplevel::requests::unset_maximized>([] {});
+            tl->on<xdg_toplevel::requests::set_minimized>([] {});
+            tl->on<xdg_toplevel::requests::set_fullscreen>([](Ref<wl_output>) {});
+            tl->on<xdg_toplevel::requests::unset_fullscreen>([] {});
+            tl->on<xdg_toplevel::requests::move>([](Ref<wl_seat>, std::uint32_t) {});
+            tl->on<xdg_toplevel::requests::resize>([](Ref<wl_seat>, std::uint32_t, xdg_toplevel_resize_edge) {});
+            tl->on<xdg_toplevel::requests::show_window_menu>([](Ref<wl_seat>, std::uint32_t, std::int32_t, std::int32_t) {});
+            tl->on<xdg_toplevel::requests::destroy>([this, &client, sid] {
+                auto* x = surface(&client, sid);
+                if (!x) return;
+                destroyed(*x);
+                x->toplevel.reset();
+            });
+            t.bind<xdg_version>(tl);
+        });
+
+        xl->on<xdg_surface::requests::get_popup>([&client, xsid](srv::NewObject<xdg_popup> p, Ref<xdg_surface>, Ref<xdg_positioner>) {
+            // Configured so the client never waits; popup content is not
+            // composited yet.
+            auto pl = std::make_shared<srv::RequestListener<xdg_popup>>();
+            pl->on<xdg_popup::requests::grab>([](Ref<wl_seat>, std::uint32_t) {});
+            pl->on<xdg_popup::requests::reposition>([](Ref<xdg_positioner>, std::uint32_t) {});
+            pl->on<xdg_popup::requests::destroy>([] {});
+            auto popup = p.bind<xdg_version>(pl);
+            popup.send<xdg_popup::events::configure>(0, 0, 1, 1);
+            srv::Resource<xdg_surface, xdg_version>{&client, xsid}.send<xdg_surface::events::configure>(
+                client.display()->next_serial());
+        });
+        xl->on<xdg_surface::requests::set_window_geometry>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
+        xl->on<xdg_surface::requests::ack_configure>([](std::uint32_t) {});
+        xl->on<xdg_surface::requests::destroy>([] {});
+        xs.bind<xdg_version>(xl);
+    });
+
+    l->on<xdg_wm_base::requests::pong>([](std::uint32_t) {});
+    l->on<xdg_wm_base::requests::destroy>([] {});
+    client.bind_resource<xdg_wm_base, xdg_version>(id, l, version);
+}
+
+// -- seat ------------------------------------------------------------------------------
+
+void Host::bind_seat(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<wl_seat>>();
+    const std::uint32_t v = std::min(version, seat_version);
+
+    l->on<wl_seat::requests::get_keyboard>([this, &client, v](srv::NewObject<wl_keyboard> k) {
+        auto kl = std::make_shared<srv::RequestListener<wl_keyboard>>();
+        kl->on<wl_keyboard::requests::release>([this, &client, kid = k.id()] { std::erase(seats_[&client].keyboards, kid); });
+        auto kb = k.bind<seat_version>(kl);
+        seats_[&client].keyboards.push_back(k.id());
+        // The keymap first: a key before its layout means nothing.
+        if (keymap_) kb.send<wl_keyboard::events::keymap>(wl_keyboard::keymap_format::xkb_v1, keymap_->fd(), keymap_->size());
+        if (v >= 4) kb.send<wl_keyboard::events::repeat_info>(25, 600);
+        if (keyboard_focus_ && keyboard_focus_->client == &client)
+            kb.send<wl_keyboard::events::enter>(display_.next_serial(), nonnull<wl_surface>(keyboard_focus_->id),
+                                                std::span<const std::byte>{});
+    });
+    l->on<wl_seat::requests::get_pointer>([this, &client, v](srv::NewObject<wl_pointer> p) {
+        auto pl = std::make_shared<srv::RequestListener<wl_pointer>>();
+        pl->on<wl_pointer::requests::set_cursor>([](std::uint32_t, Ref<wl_surface>, std::int32_t, std::int32_t) {});
+        pl->on<wl_pointer::requests::release>([this, &client, pid = p.id()] {
+            std::erase_if(seats_[&client].pointers, [&](const auto& e) { return e.first == pid; });
+        });
+        p.bind<seat_version>(pl);
+        seats_[&client].pointers.emplace_back(p.id(), v);
+    });
+    l->on<wl_seat::requests::get_touch>([](srv::NewObject<wl_touch> t) {
+        auto tl = std::make_shared<srv::RequestListener<wl_touch>>();
+        tl->on<wl_touch::requests::release>([] {});
+        t.bind<1>(tl);
+    });
+    l->on<wl_seat::requests::release>([] {});
+
+    auto seat = client.bind_resource<wl_seat, seat_version>(id, l, version);
+    seat.send<wl_seat::events::capabilities>(static_cast<wl_seat::capability>(
+        static_cast<std::uint32_t>(wl_seat::capability::pointer) | static_cast<std::uint32_t>(wl_seat::capability::keyboard)));
+    if (v >= 2) seat.send<wl_seat::events::name>("seat0");
+}
+
+void Host::bind_output(srv::Client& client, std::uint32_t version, id_t id) {
+    // One fixed output advertised for now; heads report real ones next.
+    auto l = std::make_shared<srv::RequestListener<wl_output>>();
+    l->on<wl_output::requests::release>([] {});
+    auto out = client.bind_resource<wl_output, 4>(id, l, version);
+    out.send<wl_output::events::geometry>(0, 0, 0, 0, wl_output::subpixel::unknown, "i4", "i4", wl_output::transform::normal);
+    out.send<wl_output::events::mode>(wl_output::mode::current, 1920, 1080, 60000);
+    if (version >= 2) out.send<wl_output::events::scale>(1);
+    if (version >= 4) out.send<wl_output::events::name>("i4-0");
+    if (version >= 2) out.send<wl_output::events::done>();
+}
+
+void Host::bind_subcompositor(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<wl_subcompositor>>();
+    l->on<wl_subcompositor::requests::get_subsurface>([](srv::NewObject<wl_subsurface> s, Ref<wl_surface>, Ref<wl_surface>) {
+        auto sl = std::make_shared<srv::RequestListener<wl_subsurface>>();
+        sl->on<wl_subsurface::requests::set_position>([](std::int32_t, std::int32_t) {});
+        sl->on<wl_subsurface::requests::place_above>([](Ref<wl_surface>) {});
+        sl->on<wl_subsurface::requests::place_below>([](Ref<wl_surface>) {});
+        sl->on<wl_subsurface::requests::set_sync>([] {});
+        sl->on<wl_subsurface::requests::set_desync>([] {});
+        sl->on<wl_subsurface::requests::destroy>([] {});
+        s.bind<1>(sl);
+    });
+    l->on<wl_subcompositor::requests::destroy>([] {});
+    client.bind_resource<wl_subcompositor, 1>(id, l, version);
+}
+
+/// i4 draws borders and i3 title bars, so every window is server-side.
+void Host::bind_decoration(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<zxdg_decoration_manager_v1>>();
+    l->on<zxdg_decoration_manager_v1::requests::get_toplevel_decoration>(
+        [](srv::NewObject<zxdg_toplevel_decoration_v1> d, Ref<xdg_toplevel>) {
+            auto dl = std::make_shared<srv::RequestListener<zxdg_toplevel_decoration_v1>>();
+            dl->on<zxdg_toplevel_decoration_v1::requests::set_mode>([](zxdg_toplevel_decoration_v1_mode) {});
+            dl->on<zxdg_toplevel_decoration_v1::requests::unset_mode>([] {});
+            dl->on<zxdg_toplevel_decoration_v1::requests::destroy>([] {});
+            d.bind<1>(dl).send<zxdg_toplevel_decoration_v1::events::configure>(zxdg_toplevel_decoration_v1::mode::server_side);
+        });
+    l->on<zxdg_decoration_manager_v1::requests::destroy>([] {});
+    client.bind_resource<zxdg_decoration_manager_v1, 1>(id, l, version);
+}
+
+// -- effects: the Session decided, a client is told ------------------------------------------
+
+void Host::handle(const fx::Configure& e) {
+    auto* s = surface(e.window);
+    if (!s || !s->toplevel) return;
+    const auto& t = *s->toplevel;
+    std::vector<std::uint32_t> states;
+    if (e.activated) states.push_back(static_cast<std::uint32_t>(xdg_toplevel::state::activated));
+    // Tiled on every edge (v2+): no client shadows, corners or resize handles.
+    if (t.version >= 2)
+        for (auto st : {xdg_toplevel::state::tiled_left, xdg_toplevel::state::tiled_right,
+                        xdg_toplevel::state::tiled_top, xdg_toplevel::state::tiled_bottom})
+            states.push_back(static_cast<std::uint32_t>(st));
+    const std::span<const std::byte> bytes{reinterpret_cast<const std::byte*>(states.data()), states.size() * 4};
+    srv::Resource<xdg_toplevel, xdg_version>{s->client, t.xdg_toplevel}.send<xdg_toplevel::events::configure>(
+        std::max(1, e.size.width), std::max(1, e.size.height), bytes);
+    srv::Resource<xdg_surface, xdg_version>{s->client, t.xdg_surface}.send<xdg_surface::events::configure>(display_.next_serial());
+}
+
+void Host::handle(const fx::Close& e) {
+    if (auto* s = surface(e.window); s && s->toplevel)
+        srv::Resource<xdg_toplevel, xdg_version>{s->client, s->toplevel->xdg_toplevel}.send<xdg_toplevel::events::close>();
+}
+
+void Host::handle(const fx::KeyboardFocus& e) {
+    Surface* to = e.window ? surface(*e.window) : nullptr;
+    if (to == keyboard_focus_) return;
+    if (keyboard_focus_)
+        for (auto k : seats_[keyboard_focus_->client].keyboards)
+            srv::Resource<wl_keyboard, seat_version>{keyboard_focus_->client, k}.send<wl_keyboard::events::leave>(
+                display_.next_serial(), nonnull<wl_surface>(keyboard_focus_->id));
+    keyboard_focus_ = to;
+    if (to)
+        for (auto k : seats_[to->client].keyboards) {
+            srv::Resource<wl_keyboard, seat_version> kb{to->client, k};
+            kb.send<wl_keyboard::events::enter>(display_.next_serial(), nonnull<wl_surface>(to->id), std::span<const std::byte>{});
+            if (keymap_) kb.send<wl_keyboard::events::modifiers>(display_.next_serial(), keymap_->mask(mods_), 0, 0, 0);
+        }
+}
+
+void Host::handle(const fx::Key& e) {
+    const bool mods_changed = e.mods != mods_;
+    mods_ = e.mods;
+    if (!keyboard_focus_) return;
+    for (auto k : seats_[keyboard_focus_->client].keyboards) {
+        srv::Resource<wl_keyboard, seat_version> kb{keyboard_focus_->client, k};
+        if (mods_changed && keymap_)
+            kb.send<wl_keyboard::events::modifiers>(display_.next_serial(), keymap_->mask(mods_), 0, 0, 0);
+        kb.send<wl_keyboard::events::key>(display_.next_serial(), now_ms(), e.code,
+                                          e.pressed ? wl_keyboard::key_state::pressed : wl_keyboard::key_state::released);
+    }
+}
+
+void Host::handle(const fx::PointerAt& e) {
+    Surface* over = e.window ? surface(*e.window) : nullptr;
+    const auto x = fixed::from_int(e.at.x), y = fixed::from_int(e.at.y);
+    auto each = [&](Surface* s, auto&& f) {
+        if (!s) return;
+        for (auto [p, v] : seats_[s->client].pointers) {
+            srv::Resource<wl_pointer, seat_version> r{s->client, p};
+            f(r);
+            if (v >= 5) r.send<wl_pointer::events::frame>();
+        }
+    };
+    if (over != pointer_focus_) {
+        each(pointer_focus_, [&](auto& r) {
+            r.template send<wl_pointer::events::leave>(display_.next_serial(), nonnull<wl_surface>(pointer_focus_->id));
+        });
+        pointer_focus_ = over;
+        each(over, [&](auto& r) {
+            r.template send<wl_pointer::events::enter>(display_.next_serial(), nonnull<wl_surface>(over->id), x, y);
+        });
+        return;
+    }
+    each(over, [&](auto& r) { r.template send<wl_pointer::events::motion>(now_ms(), x, y); });
+}
+
+void Host::handle(const fx::Button& e) {
+    if (!pointer_focus_) return;
+    for (auto [p, v] : seats_[pointer_focus_->client].pointers) {
+        srv::Resource<wl_pointer, seat_version> r{pointer_focus_->client, p};
+        r.send<wl_pointer::events::button>(display_.next_serial(), now_ms(), e.button,
+                                           e.pressed ? wl_pointer::button_state::pressed : wl_pointer::button_state::released);
+        if (v >= 5) r.send<wl_pointer::events::frame>();
+    }
+}
+
+void Host::handle(const fx::FramesDone& e) {
+    auto* s = surface(e.window);
+    if (!s) return;
+    const auto end = s->owed.upper_bound(e.generation);
+    std::vector<id_t> due;
+    for (auto it = s->owed.begin(); it != end; ++it) due.push_back(it->second);
+    s->owed.erase(s->owed.begin(), end);
+    answer_frames(*s->client, due, now_ms());
+}
+
+}  // namespace i4::server

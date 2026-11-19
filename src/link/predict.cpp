@@ -24,7 +24,10 @@ std::expected<void, Replica::Error> Replica::receive(const Down& d) {
             if (a.by && !pending_.empty() && pending_.front().nonce == *a.by) pending_.pop_front();
             rebuild();
             return {};
-        });
+        },
+        // Pixels are the data plane: the head's renderer takes them, the
+        // replica has nothing to do with them.
+        [&](const down::Content&) -> R { return {}; });
 }
 
 void Replica::rebuild() {
@@ -38,10 +41,14 @@ Server::Reply Server::receive(const Up& u) {
     return match(
         u,
         [&](const up::Hello& h) -> Reply {
-            if (h.fingerprint != protocol) return {Down{down::Refused{protocol}}, std::nullopt};
-            return {Down{down::Welcome{seq_, state_}}, std::nullopt};
+            if (h.fingerprint != protocol) return {Down{down::Refused{protocol}}, std::nullopt, {}, {}};
+            return {Down{down::Welcome{seq_, state_}}, std::nullopt, {}, {}};
         },
-        [&](const up::Request& r) -> Reply { return {std::nullopt, apply(r.event, r.nonce)}; });
+        [&](const up::Request& r) -> Reply { return {std::nullopt, apply(r.event, r.nonce), {}, {}}; },
+        [&](const up::Key& k) -> Reply { return {{}, {}, Input{k}, {}}; },
+        [&](const up::Motion& m) -> Reply { return {{}, {}, Input{m}, {}}; },
+        [&](const up::Button& b) -> Reply { return {{}, {}, Input{b}, {}}; },
+        [&](const up::Shown& s) -> Reply { return {{}, {}, {}, s}; });
 }
 
 }  // namespace i4::link

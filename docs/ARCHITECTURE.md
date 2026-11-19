@@ -25,14 +25,16 @@ crash-survival possible without redesigning anything later.
 Bottom to top. A layer may only include layers below it.
 `cmake/layering.cmake` enforces this as a test.
 
-| Layer    | What it is                                  | Portable | Status    |
-|----------|---------------------------------------------|----------|-----------|
-| `base`   | ids, spaces, match, enum ranges, flags      | yes      | done      |
-| `wm`     | the i3 brain: tree, commands, bindings      | yes      | done      |
-| `link`   | wire codec, protocol, replica + prediction  | yes      | done      |
-| `server` | i4d: Wayland protocol + policy, on loom     | Linux    | next      |
-| `head`   | i4-head: keys, motion, view, on mayag       | per-OS   | started   |
-| `app`    | the binaries (`i4-preview` today)           | —        | started   |
+| Layer       | What it is                                    | Portable | Status  |
+|-------------|-----------------------------------------------|----------|---------|
+| `base`      | ids, spaces, match, enum ranges, flags        | yes      | done    |
+| `wm`        | the i3 brain: tree, commands, bindings        | yes      | done    |
+| `link`      | wire codec, protocol, replica + prediction    | yes      | done    |
+| `wl`        | Wayland, both halves, no libwayland (loom)    | POSIX    | done    |
+| `transport` | link messages + fds between processes         | POSIX    | done    |
+| `server`    | i4d: Session (program) + Host (shell)         | Linux    | working |
+| `head`      | keys, motion, view, on mayag                  | per-OS   | started |
+| `app`       | `i4d`, `i4-watch`, `i4-preview`               | —        | working |
 
 `server` and `head` share a rank, so neither can include the other. They
 meet only through `link`.
@@ -139,6 +141,64 @@ the bar counts requests in flight. `i4-preview --headless` runs the same
 program under ctest. There are no Wayland clients yet, so `exec` opens a
 stand-in tile.
 
+## Every process is a jaal program on a jaal host
+
+Each i4 binary has the same split:
+
+- **The program** is a jaal `Program`: a `Model`, a `Msg` variant, one
+  `update` per message, and effects returned as values. It is pure, with no
+  fd, protocol object or syscall in it.
+- **The host** is the imperative shell. It owns every fd, turns what
+  happens on them into events, and carries out the program's effects in
+  `handle()`. It decides nothing.
+
+For i4d (`src/server/`):
+
+| File | Role |
+|------|------|
+| `vocab.hpp` | the whole conversation: `server::Event` in, `fx::*` effects out |
+| `session.*` | the program: the replicated window manager, who is configured, focus, frame pacing, which head hears what |
+| `host*.cpp` | the shell: the Wayland display (`i4::wl`), each client's objects, the link sockets |
+
+The Session never sees a protocol object. It says
+`fx::Configure{window, size, activated}`, and the host turns that into
+`xdg_toplevel.configure`.
+
+All of i4d's decisions are therefore tested under `jaal::headless` with no
+socket at all (`tests/test_session.cpp`): events in, recorded effects out.
+Examples: a frame callback waits until a head has shown that frame, and a
+head from another build is refused and dropped.
+
+Typed protocol state in the host:
+
+- A surface's double-buffered state is two types, `Pending` and `Current`,
+  and `commit()` is the only path between them.
+- A toplevel's life is `Unmapped | Mapped{WindowId}`.
+- Every object is a `wl::Resource<I, V>`, so an event newer than the bound
+  version doesn't compile.
+
+## Wayland: `i4::wl`, from loom
+
+loom's code lives in the tree as the `wl` layer (`include/i4/wl`, `src/wl`,
+`tools/wlgen.py`, `protocols/`). Only the namespace changed. Its old jaal
+glue was left out, because i4d's host does that job now.
+
+- **Generation.** 103 protocols are generated from XML into types: the
+  system's, plus the vendored wlroots, KDE and Hyprland ones.
+- **Tests.** loom's own suite runs in i4's ctest: algebra laws, resources,
+  completeness, a forked client/server round trip, server conformance, a
+  decoder fuzzer, and 20 compile-fail cases (a request newer than the bound
+  version, a server sending a request, copying an fd, ...).
+
+## Pixels never touch the log
+
+`down::Content` says only that a window has a new frame, its size, offset
+and stride. The pixels ride beside it. Locally that is the client's own
+shm pool fd, passed by `SCM_RIGHTS`, so nothing is copied. The head answers
+`up::Shown`, and only then does the client's frame callback fire, so an
+app draws at the rate the screen, local or remote, actually takes frames.
+With no head attached, frames are released at once and no client hangs.
+
 ## Types do the checking
 
 - **Coordinate spaces are types** (`Point<space::Desktop>`, `Rect<space::Surface>`, …).
@@ -195,12 +255,8 @@ version available, and only after review:
   tapestry's tree, which uses mutable nodes and per-node focus flags, was
   *not* taken. i4's `State` was redesigned around determinism and
   replication.
-- **loom** (Wayland in C++ with no libwayland; 106 protocol files, 954
-  interfaces generated, protocol versions checked at compile time). This is
-  the `server` layer's protocol substrate. Its core and server tests all
-  pass against the current jaal. Only `loom/jaal.hpp`, its event-loop glue,
-  still targets jaal's older `router`/`host_context` API, so i4 will write
-  that join itself.
+- **loom** (Wayland in C++ with no libwayland). Its code is copied in as
+  the `wl` layer, described above.
 
 ## Building
 
@@ -210,6 +266,12 @@ cmake --preset asan  && cmake --build --preset asan  && ctest --preset asan
 I4_FUZZ_SEEDS=500 ./build/release/tests/test_determinism   # deep fuzz
 I4_FUZZ_SEEDS=500 ./build/release/tests/test_replica
 ./build/debug/i4-preview                                   # try it ($mod = Alt)
+
+# a real session, on a nested socket:
+./build/debug/i4d --output 1600x900 &                      # WAYLAND_DISPLAY=wayland-i4
+WAYLAND_DISPLAY=wayland-i4 alacritty &
+./build/debug/i4-watch                                     # print the tree live
+./build/debug/i4-watch --run "split v; exec kitty"         # i4-msg, over the link
 ```
 
 Requirements: GCC 16 or Clang 23 (C++26 structured-binding packs), and

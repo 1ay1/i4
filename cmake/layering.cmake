@@ -1,11 +1,13 @@
 # cmake/layering.cmake — i4's layers, bottom to top, enforced.
 #
-#   base     vocabulary
-#   wm       the i3 brain (pure)
-#   link     server <-> head protocol
-#   server   i4d                 } same rank: neither may include the other.
-#   head     i4-head             } They meet only through link.
-#   app      binaries
+#   base       vocabulary
+#   wm         the i3 brain (pure)
+#   link       server <-> head protocol (pure)
+#   wl         Wayland wire + objects, both halves (from loom)
+#   transport  moving link messages between processes (POSIX)
+#   server     i4d                 } same rank: neither may include the other.
+#   head       i4-head             } They meet only through link.
+#   app        binaries
 #
 # A file in include/i4/<A>/ or src/<A>/ may include i4/<B>/ (or ../<B>/) only
 # when B is STRICTLY lower than A. Equal ranks are siblings and may not see
@@ -21,12 +23,14 @@ if(NOT DEFINED ROOT)
     message(FATAL_ERROR "ROOT is required")
 endif()
 
-set(rank_base   0)
-set(rank_wm     1)
-set(rank_link   2)
-set(rank_server 3)
-set(rank_head   3)
-set(rank_app    4)
+set(rank_base      0)
+set(rank_wm        1)
+set(rank_link      2)
+set(rank_wl        2)
+set(rank_transport 3)
+set(rank_server    4)
+set(rank_head      4)
+set(rank_app       5)
 
 set(portable base wm link)
 set(os_headers "unistd\\.h|sys/|linux/|fcntl\\.h|poll\\.h|xf86drm|gbm\\.h|EGL/|windows\\.h|wayland-")

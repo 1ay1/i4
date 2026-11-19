@@ -27,9 +27,11 @@
 #include <optional>
 #include <variant>
 
+#include "i4/base/geom.hpp"
 #include "i4/base/id.hpp"
 #include "i4/link/wire.hpp"
 #include "i4/wm/apply.hpp"
+#include "i4/wm/bindings.hpp"
 #include "i4/wm/state.hpp"
 
 namespace i4::link {
@@ -52,9 +54,38 @@ struct Request {
     wm::Event event;
     friend bool operator==(const Request&, const Request&) = default;
 };
+/// A key the head's bindings did not take: it goes to the focused window.
+/// `code` is an evdev keycode, i4's one keyboard vocabulary on every head
+/// platform (each head maps its OS's keys into it).
+struct Key {
+    std::uint32_t code;
+    bool pressed;
+    wm::Mods mods;
+    friend bool operator==(const Key&, const Key&) = default;
+};
+/// The pointer is here, in desktop pixels.
+struct Motion {
+    Point<space::Desktop> at;
+    friend bool operator==(const Motion&, const Motion&) = default;
+};
+/// An evdev button code (BTN_LEFT = 0x110).
+struct Button {
+    std::uint32_t button;
+    bool pressed;
+    friend bool operator==(const Button&, const Button&) = default;
+};
+/// The head has shown content `generation` of `window`. This is what paces
+/// the client: its frame callbacks fire only now, so an app draws at the
+/// rate the head (local or across a network) actually takes frames.
+struct Shown {
+    wm::WindowId window;
+    std::uint64_t generation;
+    friend bool operator==(const Shown&, const Shown&) = default;
+};
 }  // namespace up
 
-using Up = std::variant<up::Hello, up::Request>;
+using Input = std::variant<up::Key, up::Motion, up::Button>;
+using Up = std::variant<up::Hello, up::Request, up::Key, up::Motion, up::Button, up::Shown>;
 
 // -- server -> head ------------------------------------------------------------
 
@@ -76,9 +107,23 @@ struct Applied {
     std::optional<Nonce> by;
     friend bool operator==(const Applied&, const Applied&) = default;
 };
+/// A window's pixels changed. The pixels themselves are NOT in the message:
+/// a transport carries them beside it (locally a memfd passed with the
+/// packet, zero bytes on the wire; remotely, compressed tiles). This is the
+/// data plane, kept out of the replicated log on purpose: a frame is never
+/// part of the window manager's state.
+struct Content {
+    wm::WindowId window;
+    std::uint64_t generation;
+    Size<space::Buffer> size;
+    /// Where in the passed memory the frame starts, and its row pitch.
+    std::int32_t offset;
+    std::int32_t stride;
+    friend bool operator==(const Content&, const Content&) = default;
+};
 }  // namespace down
 
-using Down = std::variant<down::Welcome, down::Refused, down::Applied>;
+using Down = std::variant<down::Welcome, down::Refused, down::Applied, down::Content>;
 
 // -- the protocol's identity --------------------------------------------------------
 //

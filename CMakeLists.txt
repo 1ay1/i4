@@ -57,24 +57,48 @@ add_library(i4_link STATIC src/link/predict.cpp)
 target_link_libraries(i4_link PUBLIC i4::wm PRIVATE i4_warnings)
 add_library(i4::link ALIAS i4_link)
 
+# -- third party ------------------------------------------------------------------
+# mayag brings jaal (the runtime). SYSTEM: i4's warning flags are for i4's
+# code, not for a dependency's headers.
+set(MAYAG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MAYAG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/mayag EXCLUDE_FROM_ALL SYSTEM)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(XKB REQUIRED IMPORTED_TARGET xkbcommon)
+
+# -- wl: Wayland, both halves, no libwayland (from loom) -------------------------
+include(cmake/wl.cmake)
+
+# -- transport ------------------------------------------------------------------
+# Moving link messages between processes: a SOCK_SEQPACKET channel with fds
+# riding alongside. POSIX; a head on another OS gets its own.
+add_library(i4_transport STATIC src/transport/channel.cpp)
+target_link_libraries(i4_transport PUBLIC i4::link jaal::jaal PRIVATE i4_warnings)
+
+# -- server: i4d ------------------------------------------------------------------
+# session.cpp is the program (pure, tested headless); host*.cpp the shell.
+add_library(i4_session STATIC src/server/session.cpp)
+target_link_libraries(i4_session PUBLIC i4::link jaal::jaal PRIVATE i4_warnings)
+
+add_library(i4_server STATIC src/server/host.cpp src/server/host_protocol.cpp src/server/keyboard.cpp)
+target_link_libraries(i4_server PUBLIC i4_session i4_transport i4::wl_server PkgConfig::XKB PRIVATE i4_warnings)
+
+add_executable(i4d src/app/i4d.cpp)
+target_link_libraries(i4d PRIVATE i4_server i4_warnings)
+
+add_executable(i4-watch src/app/watch.cpp)
+target_link_libraries(i4-watch PRIVATE i4_transport i4_warnings)
+
 # -- head + preview ---------------------------------------------------------------
-# mayag (and through it jaal, the runtime) is vendored. SYSTEM: i4's warning
-# flags are for i4's code, not for a dependency's headers.
 option(I4_WITH_HEAD "Build the mayag head and i4-preview" ON)
 if(I4_WITH_HEAD)
-    set(MAYAG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(MAYAG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory(third_party/mayag EXCLUDE_FROM_ALL SYSTEM)
-
     add_library(i4_head STATIC src/head/scene.cpp)
     target_link_libraries(i4_head PUBLIC i4::link mayag::mayag PRIVATE i4_warnings)
 
     add_executable(i4-preview src/app/preview.cpp)
     target_link_libraries(i4-preview PRIVATE i4_head i4_warnings)
 endif()
-
-# The Wayland server (i4d) comes next, on loom; it will sit beside the head
-# at the same layer rank and meet it only through link.
 
 if(I4_BUILD_TESTS)
     enable_testing()
