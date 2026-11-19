@@ -2,6 +2,7 @@
 //
 //   i4-watch [--link PATH]                 print the tree on every change
 //   i4-watch [--link PATH] --run "CMDS"    i4-msg: run i3 commands, exit
+//   i4-watch [--link PATH] --key CODE      type an evdev key into the focus
 //
 // The smallest real head: it says Hello, keeps a link::Replica of the
 // session, and prints the workspaces in i3 notation each time the window
@@ -46,6 +47,7 @@ using do_print = jaal::pure_fx<Print, "watch.print">;
 
 /// --run, parsed before the program starts (jaal's init takes no arguments).
 std::optional<wm::Script> g_run;
+std::vector<std::uint32_t> g_keys;
 
 // -- the program --------------------------------------------------------------------
 
@@ -56,12 +58,15 @@ struct Watch {
         /// --run: the commands, until they are sent; then what to wait for.
         std::optional<wm::Script> to_run;
         std::optional<link::Nonce> waiting;
+        /// --key: evdev codes to type into the focused window.
+        std::vector<std::uint32_t> keys;
     };
     using Msg = Event;
     using Cmd = jaal::Cmd<Msg, do_say, do_print>;
 
     static Cmd init(Model& m) {
         m.to_run = std::move(g_run);
+        m.keys = std::move(g_keys);
         return Say{link::Replica::hello()};
     }
 
@@ -81,6 +86,16 @@ struct Watch {
             m.to_run.reset();
             m.waiting = req.nonce;
             out.push_back(Say{std::move(req)});
+        }
+        if (!m.keys.empty() && m.replica.ready()) {
+            // To the focused client, exactly as a head's keyboard would.
+            for (auto code : m.keys) {
+                out.push_back(Say{link::up::Key{code, true, {}}});
+                out.push_back(Say{link::up::Key{code, false, {}}});
+            }
+            m.keys.clear();
+            out.push_back(Cmd::quit(0));
+            return Cmd::batch(std::move(out));
         }
         const auto& s = m.replica.shown();
         std::string line;
@@ -166,6 +181,8 @@ int main(int argc, char** argv) {
                 return 2;
             }
             g_run = std::move(*s);
+        } else if (a == "--key") {
+            g_keys.push_back(static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10)));
         }
     }
     auto ch = i4::transport::Channel::connect(path);

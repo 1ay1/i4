@@ -30,15 +30,27 @@ Vec4 vec(Rect<space::Desktop> r) {
             static_cast<float>(r.size.height)};
 }
 
-Node tile(const wm::Tile& t, Vec4 at, const std::string& label) {
+Node tile(const wm::Tile& t, Vec4 at, const std::string& label, std::optional<std::uint32_t> texture) {
     const float inset = 3.0f;  // a hair of desktop between tiles
     const auto accent = t.focused ? mauve : surface1;
+    const float w = std::max(0.0f, at.z - 2 * inset), h_ = std::max(0.0f, at.w - 2 * inset);
+    if (texture) {
+        // The client's own pixels, inside an i4 border. The image fills the
+        // tile as it moves, so a window animating to a new size stretches
+        // for the few frames until its client has drawn at the new size.
+        Node frame = (box() | absolute(at.x + inset, at.y + bar_height + inset) | size(w, h_)
+                      | border(2, accent) | radius(6) | clip
+                      | shadow(t.layer == wm::Layer::floating ? 24.0f : 6.0f, crust.fade(0.6f)))
+                         .build();
+        frame.add_child((image(*texture) | absolute(2, 2) | size(std::max(0.0f, w - 4), std::max(0.0f, h_ - 4))).build());
+        return frame;
+    }
     return (v(text_owned(label) | font(13) | semibold | fg(t.focused ? text_c : subtext) | ellipsis,
               text_owned(t.layer == wm::Layer::floating ? std::string("floating") : std::string()) | font(11) |
                   fg(overlay0))
             | gap(4) | pad(10, 12)
             | absolute(at.x + inset, at.y + bar_height + inset)
-            | size(std::max(0.0f, at.z - 2 * inset), std::max(0.0f, at.w - 2 * inset))
+            | size(w, h_)
             | bg(t.focused ? surface0 : base) | border(2, accent) | radius(8)
             | shadow(t.layer == wm::Layer::floating ? 24.0f : 8.0f, crust.fade(0.6f))
             | clip)
@@ -62,14 +74,18 @@ Node bar(const Hud& hud) {
                       | pad(2, 10) | radius(6) | bg(on ? mauve : surface0))
                          .build());
     }
-    const auto net = hud.latency_ms == 0
+    const auto net = hud.latency_ms < 0
+                         ? "session · " + std::to_string(hud.in_flight) + " in flight · " +
+                               std::to_string(hud.corrections) + " corrected"
+                     : hud.latency_ms == 0
                          ? std::string("local")
                          : std::to_string(hud.latency_ms) + " ms link · " + std::to_string(hud.in_flight) +
                                " in flight · " + std::to_string(hud.corrections) + " corrected";
     return (h(h_list(std::move(ws), 6.0f),
               box() | grow(),
               text_owned(net) | font(12) | fg(hud.latency_ms == 0 ? green : peach),
-              text_owned("  F1 latency · " + hud.mod_name + "+Return open · " + hud.mod_name + "+Shift+q close")
+              text_owned("  " + hud.mod_name + "+Return open · " + hud.mod_name + "+Shift+q close · " +
+                         hud.mod_name + "+Shift+e quit")
                   | font(12) | fg(overlay0))
             | align(Align::center) | pad(0, 10) | absolute(0, 0) | width(pct(100)) | height(bar_height)
             | bg(mantle))
@@ -109,12 +125,13 @@ std::optional<Vec4> Motion::at(wm::WindowId w) const {
     return it->second.value();
 }
 
-Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud) {
+Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud, const Textures& textures) {
     std::vector<Node> layers;
     for (const auto& sc : a.screens) {
         for (const auto& t : sc.tiles) {
             const auto at = motion.at(t.window).value_or(vec(t.frame));
-            layers.push_back(tile(t, at, t.label));
+            const auto tex = textures.find(t.window);
+            layers.push_back(tile(t, at, t.label, tex == textures.end() ? std::nullopt : std::optional{tex->second}));
         }
         for (const auto& ti : sc.titles)
             if (ti.rect.size.height > 0) layers.push_back(title(ti));

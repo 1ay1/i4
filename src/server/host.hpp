@@ -98,6 +98,11 @@ struct Surface {
     std::optional<Toplevel> toplevel;
     /// Frame callbacks owed, by the content generation that satisfies them.
     std::multimap<std::uint64_t, id_t> owed;
+    /// Buffers a head may still be reading, each with the generation it was
+    /// last committed at. One goes back to the client (wl_buffer.release)
+    /// once a frame at or after that generation has been shown and it is no
+    /// longer the current buffer.
+    std::map<id_t, std::uint64_t> held;
 };
 
 // -- the host ----------------------------------------------------------------------
@@ -179,6 +184,7 @@ private:
     Surface* surface(srv::Client* c, id_t id);
     Surface* surface(wm::WindowId w);
     void answer_frames(srv::Client& c, const std::vector<id_t>& frames, std::uint32_t time);
+    void release_held(Surface& s, std::uint64_t shown);
 
     // heads (host.cpp)
     void accept_head();

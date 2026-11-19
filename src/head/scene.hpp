@@ -47,6 +47,8 @@ private:
 struct Hud {
     std::vector<std::string> workspaces;  // on the focused output, in order
     std::string focused_workspace;
+    /// Simulated link delay; 0 = local, negative = a real link (no delay to
+    /// show, only what is in flight).
     int latency_ms = 0;
     std::size_t in_flight = 0;    // requests the server has not answered
     std::uint64_t corrections = 0;
@@ -55,7 +57,12 @@ struct Hud {
 
 inline constexpr float bar_height = 28.0f;
 
+/// A window's latest pixels, as a mayag texture id.
+using Textures = std::map<wm::WindowId, std::uint32_t>;
+
 /// The whole frame: the bar on top, the output's tiles and titles under it.
-[[nodiscard]] mayag::Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud);
+/// A window with a texture shows its pixels; one without, its name.
+[[nodiscard]] mayag::Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud,
+                               const Textures& textures = {});
 
 }  // namespace i4::head

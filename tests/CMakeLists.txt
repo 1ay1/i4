@@ -36,6 +36,11 @@ add_test(NAME layering
 
 if(TARGET i4-preview)
     add_test(NAME preview_headless COMMAND i4-preview --headless)
+
+    add_executable(test_head test_head.cpp ${PROJECT_SOURCE_DIR}/src/head/head.cpp)
+    target_link_libraries(test_head PRIVATE i4_head i4_transport i4_warnings)
+    target_include_directories(test_head PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    add_test(NAME test_head COMMAND test_head)
 endif()
 
 add_subdirectory(wl)

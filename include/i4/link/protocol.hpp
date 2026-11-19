@@ -119,6 +119,9 @@ struct Content {
     /// Where in the passed memory the frame starts, and its row pitch.
     std::int32_t offset;
     std::int32_t stride;
+    /// 32-bit little-endian B,G,R,A pixels; A means something only if set
+    /// (argb8888), else the fourth byte is padding (xrgb8888).
+    bool alpha;
     friend bool operator==(const Content&, const Content&) = default;
 };
 }  // namespace down

@@ -123,4 +123,107 @@ namespace i4::head {
     return wm::Chord{mods(k.mods), std::string(*name)};
 }
 
+/// The evdev code for a physical key: what the session's keymap reads.
+/// The inverse of mayag's own evdev table (platform/wayland.hpp), and like
+/// keysym() exhaustive, so a key mayag learns is a compile error here.
+[[nodiscard]] constexpr std::optional<std::uint32_t> evdev(mayag::Key k) noexcept {
+    using K = mayag::Key;
+    switch (k) {
+        case K::unknown: return std::nullopt;
+        case K::escape: return 1;
+        case K::n1: return 2;
+        case K::n2: return 3;
+        case K::n3: return 4;
+        case K::n4: return 5;
+        case K::n5: return 6;
+        case K::n6: return 7;
+        case K::n7: return 8;
+        case K::n8: return 9;
+        case K::n9: return 10;
+        case K::n0: return 11;
+        case K::minus: return 12;
+        case K::equal: return 13;
+        case K::backspace: return 14;
+        case K::tab: return 15;
+        case K::q: return 16;
+        case K::w: return 17;
+        case K::e: return 18;
+        case K::r: return 19;
+        case K::t: return 20;
+        case K::y: return 21;
+        case K::u: return 22;
+        case K::i: return 23;
+        case K::o: return 24;
+        case K::p: return 25;
+        case K::bracket_left: return 26;
+        case K::bracket_right: return 27;
+        case K::enter: return 28;
+        case K::ctrl: return 29;
+        case K::a: return 30;
+        case K::s: return 31;
+        case K::d: return 32;
+        case K::f: return 33;
+        case K::g: return 34;
+        case K::h: return 35;
+        case K::j: return 36;
+        case K::k: return 37;
+        case K::l: return 38;
+        case K::semicolon: return 39;
+        case K::quote: return 40;
+        case K::grave: return 41;
+        case K::shift: return 42;
+        case K::backslash: return 43;
+        case K::z: return 44;
+        case K::x: return 45;
+        case K::c: return 46;
+        case K::v: return 47;
+        case K::b: return 48;
+        case K::n: return 49;
+        case K::m: return 50;
+        case K::comma: return 51;
+        case K::period: return 52;
+        case K::slash: return 53;
+        case K::alt: return 56;
+        case K::space: return 57;
+        case K::caps_lock: return 58;
+        case K::f1: return 59;
+        case K::f2: return 60;
+        case K::f3: return 61;
+        case K::f4: return 62;
+        case K::f5: return 63;
+        case K::f6: return 64;
+        case K::f7: return 65;
+        case K::f8: return 66;
+        case K::f9: return 67;
+        case K::f10: return 68;
+        case K::f11: return 87;
+        case K::f12: return 88;
+        case K::home: return 102;
+        case K::up: return 103;
+        case K::page_up: return 104;
+        case K::left: return 105;
+        case K::right: return 106;
+        case K::end: return 107;
+        case K::down: return 108;
+        case K::page_down: return 109;
+        case K::insert: return 110;
+        case K::del: return 111;
+        case K::super: return 125;
+    }
+    return std::nullopt;
+}
+
+/// evdev button codes (linux/input-event-codes.h), so the portable layers
+/// never include a Linux header.
+[[nodiscard]] constexpr std::uint32_t evdev(mayag::MouseButton b) noexcept {
+    switch (b) {
+        case mayag::MouseButton::left: return 0x110;
+        case mayag::MouseButton::right: return 0x111;
+        case mayag::MouseButton::middle: return 0x112;
+        case mayag::MouseButton::back: return 0x116;
+        case mayag::MouseButton::forward: return 0x115;
+    }
+    return 0x110;
+}
+
 }  // namespace i4::head

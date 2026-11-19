@@ -5,6 +5,7 @@
 // to a client.
 #include <algorithm>
 #include <ctime>
+#include <limits>
 
 #include "host.hpp"
 #include "i4/base/match.hpp"
@@ -205,11 +206,14 @@ void Host::committed(Surface& s) {
     if (s.current.buffer && buffers_.contains({s.client, *s.current.buffer})) {
         ++t.generation;
         for (auto cb : frames) s.owed.emplace(t.generation, cb);
-        // The head maps the pool; the buffer object is the client's again.
-        srv::Resource<wl_buffer, 1>{s.client, *s.current.buffer}.send<wl_buffer::events::release>();
+        // A head reads this buffer's memory; it goes back to the client
+        // (wl_buffer.release) only when that frame has been shown.
+        s.held[*s.current.buffer] = t.generation;
         emit(ev::Committed{w, t.generation});
         return;
     }
+    // Detached: nothing is on screen from this surface any more.
+    release_held(s, std::numeric_limits<std::uint64_t>::max());
     answer_frames(*s.client, frames, now_ms());
 }
 
@@ -509,6 +513,16 @@ void Host::handle(const fx::FramesDone& e) {
     for (auto it = s->owed.begin(); it != end; ++it) due.push_back(it->second);
     s->owed.erase(s->owed.begin(), end);
     answer_frames(*s->client, due, now_ms());
+    release_held(*s, e.generation);
+}
+
+void Host::release_held(Surface& s, std::uint64_t shown) {
+    for (auto it = s.held.begin(); it != s.held.end();) {
+        const bool done = it->second <= shown && it->first != s.current.buffer;
+        if (done && buffers_.contains({s.client, it->first}))
+            srv::Resource<wl_buffer, 1>{s.client, it->first}.send<wl_buffer::events::release>();
+        it = done ? s.held.erase(it) : std::next(it);
+    }
 }
 
 }  // namespace i4::server

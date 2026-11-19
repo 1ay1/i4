@@ -152,7 +152,7 @@ void Host::handle(const fx::Share& e) {
     // Zero copy: the client's own pool goes to the head, with where in it
     // this frame is. Nothing here maps it.
     const link::down::Content c{e.window, s->toplevel->generation, Size<space::Buffer>{buf.width, buf.height},
-                                buf.offset, buf.stride};
+                                buf.offset, buf.stride, buf.format == F::argb8888};
     const auto bytes = link::encode(link::Down{c});
     for (auto id : e.to) {
         auto it = heads_.find(id);

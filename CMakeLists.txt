@@ -93,11 +93,14 @@ target_link_libraries(i4-watch PRIVATE i4_transport i4_warnings)
 # -- head + preview ---------------------------------------------------------------
 option(I4_WITH_HEAD "Build the mayag head and i4-preview" ON)
 if(I4_WITH_HEAD)
-    add_library(i4_head STATIC src/head/scene.cpp)
+    add_library(i4_head STATIC src/head/scene.cpp src/head/pixels.cpp)
     target_link_libraries(i4_head PUBLIC i4::link mayag::mayag PRIVATE i4_warnings)
 
     add_executable(i4-preview src/app/preview.cpp)
     target_link_libraries(i4-preview PRIVATE i4_head i4_warnings)
+
+    add_executable(i4-head src/app/head.cpp src/head/head.cpp)
+    target_link_libraries(i4-head PRIVATE i4_head i4_transport i4_warnings)
 endif()
 
 if(I4_BUILD_TESTS)
