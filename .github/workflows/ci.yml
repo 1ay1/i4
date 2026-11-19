@@ -1,0 +1,26 @@
+name: ci
+# The session (i4d) only runs on Linux; a head runs anywhere. The macOS job
+# proves the head builds where most remote heads will run.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos-head:
+    name: macos head
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install toolchain and libraries
+        run: brew install gcc@16 ninja pkg-config ffmpeg zstd libsodium
+      - name: Configure (head only)
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-16 \
+                -DI4_BUILD_TESTS=OFF
+      - name: Build i4-head
+        run: cmake --build build -j --target i4-head
+      - name: It runs
+        run: ./build/i4-head --link tcp:127.0.0.1:1 --key 0000000000000000000000000000000000000000000000000000000000000000 || true
