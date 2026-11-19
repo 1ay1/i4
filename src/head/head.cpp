@@ -129,8 +129,10 @@ Cmd Head::update(Model&, GpuDone d) { return say(link::up::Released{d.window, d.
 /// straight into memory this GPU shows as it is.
 Cmd Head::update(Model&, GpuReady g) {
     if (!options.zero_copy) g.formats.clear();
-    std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts\n", g.formats.size());
-    return say(link::up::Caps{std::move(g.formats)});
+    std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts, explicit sync %s\n", g.formats.size(),
+                 g.explicit_sync ? "on" : "off");
+    if (!options.zero_copy) g.explicit_sync = false;
+    return say(link::up::Caps{std::move(g.formats), g.explicit_sync});
 }
 
 Cmd Head::update(Model& m, Lost) {

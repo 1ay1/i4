@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <variant>
 #include <vector>
@@ -31,6 +32,7 @@
 #include <i4/wl/proto/xdg_decoration_unstable_v1.hpp>
 #include <i4/wl/proto/xdg_shell.hpp>
 #include <i4/wl/proto/linux_dmabuf_v1.hpp>
+#include <i4/wl/proto/linux_drm_syncobj_v1.hpp>
 #include <i4/wl/server/display.hpp>
 #include <jaal/jaal.hpp>
 
@@ -84,16 +86,25 @@ struct Params {
 
 // -- surfaces ------------------------------------------------------------------
 
+/// A point on a client timeline (linux-drm-syncobj): timeline id, value.
+struct SyncPoint {
+    std::uint64_t timeline = 0;
+    std::uint64_t value = 0;
+};
+
 /// What a client has said since its last commit.
 struct Pending {
     /// Outer: attach was called this cycle. Inner: the buffer, or detach.
     std::optional<std::optional<id_t>> attach;
     std::vector<id_t> frames;
+    std::optional<SyncPoint> acquire, release;
 };
 
 /// What the surface IS, as of its last commit.
 struct Current {
     std::optional<id_t> buffer;
+    /// Explicit sync for the committed buffer (both, or neither).
+    std::optional<SyncPoint> acquire, release;
 };
 
 /// The one way from Pending to Current. Returns the frame callbacks this
@@ -125,6 +136,9 @@ struct Surface {
     std::optional<Toplevel> toplevel;
     /// Frame callbacks owed, by the content generation that satisfies them.
     std::multimap<std::uint64_t, id_t> owed;
+    /// It has a wp_linux_drm_syncobj_surface_v1: every buffer it commits
+    /// must carry acquire and release points.
+    bool explicit_sync = false;
     /// Buffers a head may still be reading, each with the generation it was
     /// last committed at. One goes back to the client (wl_buffer.release)
     /// once a frame at or after that generation has been shown and it is no
@@ -215,6 +229,7 @@ private:
     void bind_decoration(srv::Client& c, std::uint32_t version, id_t id);
     void bind_dmabuf(srv::Client& c, std::uint32_t version, id_t id);
     void bind_data_device_manager(srv::Client& c, std::uint32_t version, id_t id);
+    void bind_syncobj(srv::Client& c, std::uint32_t version, id_t id);
     /// Offer the current selection to `c` (its data devices), or none.
     void offer_selection(srv::Client& c);
     void set_selection(std::optional<Key> source);
@@ -268,6 +283,16 @@ private:
     std::uint64_t main_device_ = 0;  // dev_t of the render node
     std::optional<std::uint32_t> dmabuf_global_;  // the registry name, while advertised
     std::uint64_t next_buffer_id_ = 1;
+
+    // linux-drm-syncobj: client timelines (DRM syncobj fds), by id, and
+    // which heads have been sent each. Advertised while every head can
+    // wait/signal on the GPU (fx::Formats carries that).
+    std::map<std::uint64_t, std::shared_ptr<wl::OwnedFd>> timelines_;
+    std::map<Key, std::uint64_t> timeline_ids_;  // the client's object -> id
+    std::map<HeadId, std::set<std::uint64_t>> timelines_sent_;
+    std::uint64_t next_timeline_ = 1;
+    std::optional<std::uint32_t> syncobj_global_;
+    bool explicit_sync_ = false;
     std::vector<std::pair<srv::Client*, id_t>> feedbacks_;  // to re-send on change
     std::map<wm::WindowId, Key> windows_;
     struct Seat {

@@ -71,11 +71,17 @@ public:
         for (auto& p : *packets) {
             auto d = link::decode<link::Down>(p.bytes);
             if (!d) continue;
+            if (const auto* t = std::get_if<link::down::Timeline>(&*d)) {
+                timeline(*t, p.fds);
+                continue;
+            }
             Heard h{std::move(*d), std::nullopt, 0};
             if (const auto* c = std::get_if<link::down::Content>(&h.message); c && !p.fds.empty()) {
                 const auto t0 = std::chrono::steady_clock::now();
-                if (const auto* dl = std::get_if<link::down::DmabufLayout>(&c->layout))
+                if (const auto* dl = std::get_if<link::down::DmabufLayout>(&c->layout)) {
                     h.texture = import(*c, *dl, p.fds);
+                    if (h.texture != 0 && c->sync) sync(*c);
+                }
                 else
                     h.pixels = frame(*c, std::get<link::down::ShmLayout>(c->layout), p.fds.front());
                 if (trace_) {
@@ -103,7 +109,7 @@ public:
         // it importing tells the program what clients may render into.
         if (!gpu_announced_ && window_.window().can_import_images()) {
             gpu_announced_ = true;
-            emit_(GpuReady{importable()});
+            emit_(GpuReady{importable(), window_.window().explicit_sync()});
         }
         const bool want = link_.wants_write();
         if (reg_ && want != writing_ && reg_->modify(want ? jaal::interest::read_write : jaal::interest::read))
@@ -242,10 +248,42 @@ private:
             cached = std::prev(win.cache.end());
         }
         // The frame on screen until now: free once the GPU is done with it.
-        if (win.shown != 0)
-            window_.window().after_gpu([this, w = c.window, g = win.shown] { gpu_done_.push_back({w, g}); });
+        // With explicit sync the GPU signals the client's release point
+        // itself (sync()); without, we tell the session (Released).
+        if (win.shown != 0) {
+            if (win.release)
+                window_.window().signal_after_submitted(win.release->timeline, win.release->value);
+            else
+                window_.window().after_gpu([this, w = c.window, g = win.shown] { gpu_done_.push_back({w, g}); });
+        }
+        win.release.reset();
         win.shown = c.generation;
         return cached->texture;
+    }
+
+    /// A client timeline, once: imported on the GPU, named by id; or gone.
+    void timeline(const link::down::Timeline& t, const std::vector<transport::Fd>& fds) {
+        if (t.gone) {
+            if (auto it = timelines_.find(t.id); it != timelines_.end()) {
+                window_.window().release_timeline(it->second);
+                timelines_.erase(it);
+            }
+            return;
+        }
+        if (fds.empty() || timelines_.contains(t.id)) return;
+        if (const auto gpu = window_.window().import_timeline(fds.front().get()); gpu != 0) timelines_[t.id] = gpu;
+    }
+
+    /// This frame's explicit sync, on the GPU: the next submit waits for the
+    /// client's acquire point before sampling the buffer. Its release point
+    /// is signalled when the buffer leaves the screen, by the submit after
+    /// the one that last sampled it (import() above).
+    void sync(const link::down::Content& c) {
+        const auto a = timelines_.find(c.sync->acquire_timeline);
+        const auto r = timelines_.find(c.sync->release_timeline);
+        if (a == timelines_.end() || r == timelines_.end()) return;
+        window_.window().frame_wait(a->second, c.sync->acquire_point);
+        windows_[c.window].release = GpuPoint{r->second, c.sync->release_point};
     }
 
     /// A window is gone: its imported buffers go with it.
@@ -253,6 +291,8 @@ private:
         auto it = windows_.find(w);
         if (it == windows_.end()) return;
         for (const auto& i : it->second.cache) window_.window().release_texture(i.texture);
+        if (it->second.release)
+            window_.window().signal_after_submitted(it->second.release->timeline, it->second.release->value);
         windows_.erase(it);
     }
 
@@ -274,10 +314,17 @@ private:
         std::uint64_t buffer;   // the client's buffer (DmabufLayout::buffer)
         std::uint32_t texture;  // where it is on the GPU
     };
+    struct GpuPoint {
+        std::uint32_t timeline;  // the GPU's handle
+        std::uint64_t value;
+    };
     struct WindowGpu {
         std::vector<Imported> cache;  // least recently shown first
         std::uint64_t shown = 0;      // generation on screen
+        /// Explicit sync: what to signal when the frame on screen leaves it.
+        std::optional<GpuPoint> release;
     };
+    std::map<std::uint64_t, std::uint32_t> timelines_;  // session id -> GPU handle
     std::map<wm::WindowId, WindowGpu> windows_;
     std::uint32_t next_texture_ = 0x2000'0000u;
     std::vector<GpuDone> gpu_done_;

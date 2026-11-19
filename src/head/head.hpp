@@ -58,6 +58,7 @@ struct GpuDone {
 /// this is what it can sample in place.
 struct GpuReady {
     std::vector<link::up::Format> formats;
+    bool explicit_sync = false;
 };
 /// The session went away.
 struct Lost {};

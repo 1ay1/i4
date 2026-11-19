@@ -127,7 +127,7 @@ TEST(a_frame_is_uploaded_and_acknowledged) {
     mayag::ImageData img;
     img.width = img.height = 1;
     img.rgba = {1, 2, 3, 255};
-    h.send(Heard{link::down::Content{wm::WindowId{1}, 5, {1, 1}, link::down::ShmLayout{0, 4, true}},
+    h.send(Heard{link::down::Content{wm::WindowId{1}, 5, {1, 1}, link::down::ShmLayout{0, 4, true}, std::nullopt},
                  jaal::shared<mayag::ImageData>::make(std::move(img))});
     CHECK_EQ(h.effects<mayag::upload_image>().size(), 1u);
     const auto s = said(h);

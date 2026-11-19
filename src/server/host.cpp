@@ -132,6 +132,7 @@ void Host::read_head(HeadId id) {
 }
 
 void Host::drop_head(HeadId id) {
+    timelines_sent_.erase(id);
     if (heads_.erase(id) != 0) emit(ev::HeadLeft{id});
 }
 
@@ -156,6 +157,7 @@ void Host::handle(const fx::Drop& e) {
     if (auto it = heads_.find(e.head); it != heads_.end()) {
         (void)it->second.channel.flush();  // let the refusal out first
         heads_.erase(it);
+        timelines_sent_.erase(e.head);
     }
 }
 
@@ -169,7 +171,7 @@ void Host::handle(const fx::Share& e) {
     // the pool; dmabuf: each plane), with where in it this frame is.
     // Nothing here maps or reads it.
     const auto dup = [](int fd) { return transport::Fd{::fcntl(fd, F_DUPFD_CLOEXEC, 0)}; };
-    link::down::Content c{e.window, s->toplevel->generation, {}, link::down::ShmLayout{}};
+    link::down::Content c{e.window, s->toplevel->generation, {}, link::down::ShmLayout{}, std::nullopt};
     std::vector<int> fds;
     const bool ok = match(
         b->second,
@@ -193,10 +195,28 @@ void Host::handle(const fx::Share& e) {
         });
     if (!ok) return;
 
+    // Explicit sync: the frame names its points; each timeline's fd goes to
+    // a head once, the first time a frame of that head needs it.
+    if (s->current.acquire && s->current.release)
+        c.sync = link::down::SyncPoints{s->current.acquire->timeline, s->current.acquire->value,
+                                        s->current.release->timeline, s->current.release->value};
     const auto bytes = link::encode(link::Down{c});
     for (auto id : e.to) {
         auto it = heads_.find(id);
         if (it == heads_.end()) continue;
+        if (c.sync) {
+            auto& sent = timelines_sent_[id];
+            for (auto tid : {c.sync->acquire_timeline, c.sync->release_timeline}) {
+                if (sent.contains(tid)) continue;
+                auto t = timelines_.find(tid);
+                if (t == timelines_.end()) continue;
+                std::vector<transport::Fd> tfd;
+                tfd.push_back(dup(t->second->get()));
+                if (!tfd.front().valid()) continue;
+                if (it->second.channel.send(link::encode(link::Down{link::down::Timeline{tid, false}}), std::move(tfd)))
+                    sent.insert(tid);
+            }
+        }
         std::vector<transport::Fd> owned;
         for (int fd : fds) owned.push_back(dup(fd));
         if (std::ranges::any_of(owned, [](const auto& f) { return !f.valid(); })) continue;
