@@ -39,12 +39,14 @@ int main(int argc, char** argv) {
     }
     server::Host host({.keyboard_layout = layout,
                        .output = wm::OutputInfo{"i4-0", {0, 0, width, height}},
-                       .wayland_display = socket},
+                       .wayland_display = socket,
+                       .app_log = std::string(runtime) + "/i4-apps.log"},
                       std::move(*listener));
     if (!host.display().add_socket(socket)) {
         std::fprintf(stderr, "i4d: cannot listen on %s\n", socket.c_str());
         return 1;
     }
-    std::printf("i4d: WAYLAND_DISPLAY=%s  link %s  output %dx%d\n", socket.c_str(), link.c_str(), width, height);
+    std::printf("i4d: WAYLAND_DISPLAY=%s  link %s  output %dx%d\n     apps log to %s/i4-apps.log\n", socket.c_str(),
+                link.c_str(), width, height, runtime);
     return jaal::run<server::Session>(host);
 }

@@ -161,6 +161,9 @@ struct DmabufLayout {
         std::uint32_t stride;
         friend bool operator==(const Plane&, const Plane&) = default;
     };
+    /// The client buffer, stable for its life and never reused: clients
+    /// cycle two or three buffers, so a head imports each ONCE and rebinds.
+    std::uint64_t buffer;
     std::uint32_t fourcc;
     std::uint64_t modifier;
     std::vector<Plane> planes;

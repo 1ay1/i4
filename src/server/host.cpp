@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "i4/base/match.hpp"
@@ -28,6 +29,15 @@ Host::Host(Options options, transport::Fd link_listener)
         keymap_.emplace(std::move(*k));
     else
         std::fprintf(stderr, "i4d: %s (keyboards get no keymap)\n", k.error().c_str());
+    // The GPU clients render on, named in dmabuf feedback from the first
+    // client on, so EGL loads the right driver even before a head attaches.
+    for (const char* node : {"/dev/dri/renderD128", "/dev/dri/renderD129"}) {
+        struct stat st{};
+        if (::stat(node, &st) == 0) {
+            main_device_ = st.st_rdev;
+            break;
+        }
+    }
     display_.on_client_created([this](srv::Client& c) { greet(c); });
     publish_globals();
 }
@@ -173,7 +183,7 @@ void Host::handle(const fx::Share& e) {
         },
         [&](const DmabufBuffer& buf) {
             c.size = {buf.width, buf.height};
-            link::down::DmabufLayout d{buf.fourcc, buf.modifier, {}};
+            link::down::DmabufLayout d{buf.id, buf.fourcc, buf.modifier, {}};
             for (const auto& p : buf.planes) {
                 d.planes.push_back({p.offset, p.stride});
                 fds.push_back(p.fd->get());
@@ -206,7 +216,6 @@ Event Host::handle(const fx::Spawn& e) {
     //     picks Wayland
     namespace pf = jaal::platform;
     pf::process_spec spec;
-    spec.argv = {"sh", "-c", e.command};
     spec.env_is_complete = true;
     for (char** env = environ; *env != nullptr; ++env) {
         const std::string_view kv = *env;
@@ -225,6 +234,11 @@ Event Host::handle(const fx::Spawn& e) {
 
     const auto id = next_launch_;
     next_launch_ = next_launch_.next();
+    // An app's own chatter (Chrome's sandbox notices, a terminal's parser
+    // complaints) is the app's, not the session's: it goes to a log, one
+    // per session, rather than into i4d's terminal.
+    spec.argv = {"sh", "-c", "exec >>\"$I4_APP_LOG\" 2>&1; exec " + e.command};
+    spec.env.emplace_back("I4_APP_LOG", options_.app_log);
     auto p = pf::native_process::spawn(spec);
     if (!p) {
         std::fprintf(stderr, "i4d: cannot run: %s\n", e.command.c_str());

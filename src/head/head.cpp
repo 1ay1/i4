@@ -80,8 +80,8 @@ Cmd Head::update(Model& m, Heard h) {
         // has finished with it (GpuDone). Copied pixels are uploaded, and
         // the client's memory is free again at once.
         const auto tex = texture_of(c->window);
-        if (h.imported) {
-            m.textures[c->window] = tex;
+        if (h.texture != 0) {
+            m.textures[c->window] = h.texture;
         } else if (h.pixels) {
             m.textures[c->window] = tex;
             out.push_back(mayag::upload(tex, std::move(*h.pixels)));
@@ -114,7 +114,8 @@ Cmd Head::update(Model& m, Heard h) {
             ++it;
             continue;
         }
-        out.push_back(mayag::ReleaseImage{it->second});
+        out.push_back(mayag::ReleaseImage{texture_of(it->first)});  // its copied frames
+        out.push_back(Forget{it->first});                           // its imported buffers
         it = m.textures.erase(it);
     }
     rearrange(m);

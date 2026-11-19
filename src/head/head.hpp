@@ -45,8 +45,9 @@ namespace i4::head {
 struct Heard {
     link::Down message;
     std::optional<jaal::shared<mayag::ImageData>> pixels;
-    /// The dmabuf was imported as the window's texture: nothing to upload.
-    bool imported = false;
+    /// The dmabuf is on the GPU as this texture (imported once per client
+    /// buffer, then rebound): nothing to upload. 0 = not imported.
+    std::uint32_t texture = 0;
 };
 /// The GPU has finished sampling frames up to `generation` of `window`.
 struct GpuDone {
@@ -74,6 +75,11 @@ struct Say {
     link::Up message;
 };
 using do_say = jaal::pure_fx<Say, "head.say">;
+/// A window is gone: drop every GPU buffer imported for it.
+struct Forget {
+    wm::WindowId window;
+};
+using do_forget = jaal::pure_fx<Forget, "head.forget">;
 
 // -- the program -----------------------------------------------------------------------
 
@@ -123,7 +129,7 @@ struct Head {
     using Msg = std::variant<Heard, GpuDone, GpuReady, Lost, mayag::KeyEvent, mayag::TextEvent, mayag::Clicked, mayag::MouseMove,
                              mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, ClearNotice,
                              mayag::CloseRequest>;
-    using Cmd = mayag::Cmd<Msg, do_say, mayag::upload_image, mayag::release_image, mayag::set_title>;
+    using Cmd = mayag::Cmd<Msg, do_say, do_forget, mayag::upload_image, mayag::release_image, mayag::set_title>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model& m);

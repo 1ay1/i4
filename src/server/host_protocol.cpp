@@ -116,7 +116,7 @@ void Host::publish_globals() {
     global(std::type_identity<wl_output>{}, 4, &Host::bind_output);
     global(std::type_identity<wl_subcompositor>{}, 1, &Host::bind_subcompositor);
     global(std::type_identity<zxdg_decoration_manager_v1>{}, 1, &Host::bind_decoration);
-    global(std::type_identity<zwp_linux_dmabuf_v1>{}, 4, &Host::bind_dmabuf);
+    global(std::type_identity<wl_data_device_manager>{}, 3, &Host::bind_data_device_manager);
 }
 
 void Host::destroyed(Surface& s) {
@@ -141,6 +141,9 @@ void Host::forget(srv::Client& c) {
     std::erase_if(buffers_, [&](const auto& kv) { return kv.first.first == &c; });
     std::erase_if(params_, [&](const auto& kv) { return kv.first.first == &c; });
     std::erase_if(feedbacks_, [&](const auto& f) { return f.first == &c; });
+    std::erase_if(offers_, [&](const auto& kv) { return kv.first.first == &c || kv.second.first == &c; });
+    std::erase_if(sources_, [&](const auto& kv) { return kv.first.first == &c; });
+    if (selection_ && selection_->first == &c) set_selection(std::nullopt);
     seats_.erase(&c);
 }
 
@@ -461,12 +464,16 @@ void Host::handle(const fx::KeyboardFocus& e) {
             srv::Resource<wl_keyboard, seat_version>{keyboard_focus_->client, k}.send<wl_keyboard::events::leave>(
                 display_.next_serial(), nonnull<wl_surface>(keyboard_focus_->id));
     keyboard_focus_ = to;
-    if (to)
+    if (to) {
         for (auto k : seats_[to->client].keyboards) {
             srv::Resource<wl_keyboard, seat_version> kb{to->client, k};
             kb.send<wl_keyboard::events::enter>(display_.next_serial(), nonnull<wl_surface>(to->id), std::span<const std::byte>{});
             if (keymap_) kb.send<wl_keyboard::events::modifiers>(display_.next_serial(), keymap_->mask(mods_), 0, 0, 0);
         }
+        // The protocol's rule: a client sees the clipboard when it gains
+        // keyboard focus, just before its first key.
+        offer_selection(*to->client);
+    }
 }
 
 void Host::handle(const fx::Key& e) {
@@ -566,9 +573,15 @@ void Host::rebuild_format_table() {
 void Host::handle(const fx::Formats& e) {
     formats_ = e.formats;
     rebuild_format_table();
-    if (main_device_ == 0) {
-        struct stat st{};
-        if (::stat("/dev/dri/renderD128", &st) == 0) main_device_ = st.st_rdev;
+    // linux-dmabuf exists exactly while some head can show GPU buffers. With
+    // none, an app that bound it would allocate a layout nobody can sample;
+    // without it, every app falls back to shm, which always works.
+    if (formats_.empty() && dmabuf_global_) {
+        display_.remove_global(*dmabuf_global_);
+        dmabuf_global_.reset();
+    } else if (!formats_.empty() && !dmabuf_global_) {
+        dmabuf_global_ = display_.add_global<zwp_linux_dmabuf_v1>(
+            4, [this](srv::Client& c, std::uint32_t v, id_t id) { bind_dmabuf(c, v, id); });
     }
     // Clients that already asked hear the new table now (v4: feedback is
     // live; a client reallocates on the next frame).
@@ -640,6 +653,7 @@ void Host::bind_dmabuf(srv::Client& client, std::uint32_t version, id_t id) {
             b.modifier = it->second.modifier;
             b.width = w;
             b.height = h;
+            b.id = next_buffer_id_++;
             for (std::uint32_t i = 0; i < it->second.planes.size(); ++i) {
                 auto plane = it->second.planes.find(i);
                 if (plane == it->second.planes.end()) return std::nullopt;  // planes must be 0..n-1
@@ -694,6 +708,105 @@ void Host::bind_dmabuf(srv::Client& client, std::uint32_t version, id_t id) {
                 d.send<zwp_linux_dmabuf_v1::events::modifier>(f.fourcc, static_cast<std::uint32_t>(f.modifier >> 32),
                                                               static_cast<std::uint32_t>(f.modifier));
         }
+}
+
+// -- the clipboard: wl_data_device_manager --------------------------------------------
+//
+// Data never passes through i4d: a reader's receive(mime, fd) is forwarded
+// to the source as send(mime, fd), and the two clients talk over that pipe.
+// Drag and drop is accepted and not yet performed (start_drag is ignored;
+// the source is told it was cancelled).
+
+void Host::bind_data_device_manager(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<wl_data_device_manager>>();
+
+    l->on<wl_data_device_manager::requests::create_data_source>([this, &client](srv::NewObject<wl_data_source> s) {
+        const Key key{&client, s.id()};
+        sources_[key] = {};
+        auto sl = std::make_shared<srv::RequestListener<wl_data_source>>();
+        sl->on<wl_data_source::requests::offer>([this, key](std::string_view mime) {
+            if (auto it = sources_.find(key); it != sources_.end()) it->second.mime_types.emplace_back(mime);
+        });
+        sl->on<wl_data_source::requests::set_actions>([](wl_data_device_manager_dnd_action) {});
+        sl->on<wl_data_source::requests::destroy>([this, key] {
+            sources_.erase(key);
+            std::erase_if(offers_, [&](const auto& kv) { return kv.second == key; });
+            if (selection_ == key) set_selection(std::nullopt);
+        });
+        s.bind<3>(sl);
+    });
+
+    l->on<wl_data_device_manager::requests::get_data_device>([this, &client](srv::NewObject<wl_data_device> d, Ref<wl_seat>) {
+        auto dl = std::make_shared<srv::RequestListener<wl_data_device>>();
+        dl->on<wl_data_device::requests::set_selection>([this, &client](Ref<wl_data_source> src, std::uint32_t) {
+            // Only a client with keyboard focus may set the selection, and
+            // only with a source of its own.
+            if (!keyboard_focus_ || keyboard_focus_->client != &client) return;
+            if (!src) {
+                set_selection(std::nullopt);
+                return;
+            }
+            const Key key{&client, src.id};
+            if (sources_.contains(key)) set_selection(key);
+        });
+        dl->on<wl_data_device::requests::start_drag>(
+            [&client](Ref<wl_data_source> src, Ref<wl_surface>, Ref<wl_surface>, std::uint32_t) {
+                if (src) srv::Resource<wl_data_source, 3>{&client, src.id}.send<wl_data_source::events::cancelled>();
+            });
+        dl->on<wl_data_device::requests::release>([this, &client, did = d.id()] {
+            std::erase(seats_[&client].data_devices, did);
+        });
+        d.bind<3>(dl);
+        seats_[&client].data_devices.push_back(d.id());
+        if (keyboard_focus_ && keyboard_focus_->client == &client) offer_selection(client);
+    });
+
+    l->on<wl_data_device_manager::requests::release>([] {});
+    client.bind_resource<wl_data_device_manager, 3>(id, l, version);
+}
+
+void Host::set_selection(std::optional<Key> source) {
+    if (selection_ == source) return;
+    if (selection_ && sources_.contains(*selection_))
+        srv::Resource<wl_data_source, 3>{selection_->first, selection_->second}.send<wl_data_source::events::cancelled>();
+    selection_ = source;
+    // Offers of the old selection now read nothing.
+    std::erase_if(offers_, [&](const auto& kv) { return kv.second != selection_; });
+    if (keyboard_focus_) offer_selection(*keyboard_focus_->client);
+    display_.flush_clients();
+}
+
+void Host::offer_selection(srv::Client& c) {
+    for (auto did : seats_[&c].data_devices) {
+        srv::Resource<wl_data_device, 3> dev{&c, did};
+        const auto src = selection_ ? sources_.find(*selection_) : sources_.end();
+        if (src == sources_.end()) {
+            dev.send<wl_data_device::events::selection>(Ref<wl_data_offer>{});
+            continue;
+        }
+        // A fresh offer for this client: introduced, its types listed, then
+        // named as the selection.
+        const id_t oid = dev.send<wl_data_device::events::data_offer>();
+        auto ol = std::make_shared<srv::RequestListener<wl_data_offer>>();
+        const Key okey{&c, oid};
+        ol->on<wl_data_offer::requests::receive>([this, okey](std::string_view mime, BorrowedFd fd) {
+            OwnedFd pipe{fd.get()};  // ours to close once forwarded
+            auto it = offers_.find(okey);
+            if (it == offers_.end() || !sources_.contains(it->second)) return;
+            srv::Resource<wl_data_source, 3>{it->second.first, it->second.second}.send<wl_data_source::events::send>(
+                mime, BorrowedFd{pipe.get()});
+            display_.flush_clients();
+        });
+        ol->on<wl_data_offer::requests::accept>([](std::uint32_t, std::optional<std::string_view>) {});
+        ol->on<wl_data_offer::requests::finish>([] {});
+        ol->on<wl_data_offer::requests::set_actions>(
+            [](wl_data_device_manager_dnd_action, wl_data_device_manager_dnd_action) {});
+        ol->on<wl_data_offer::requests::destroy>([this, okey] { offers_.erase(okey); });
+        auto offer = srv::NewObject<wl_data_offer>{&c, oid, did}.bind<3>(ol);
+        offers_[okey] = *selection_;
+        for (const auto& mime : src->second.mime_types) offer.send<wl_data_offer::events::offer>(mime);
+        dev.send<wl_data_device::events::selection>(Ref<wl_data_offer>{oid});
+    }
 }
 
 }  // namespace i4::server

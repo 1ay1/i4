@@ -68,6 +68,8 @@ struct DmabufBuffer {
     std::uint32_t fourcc = 0;
     std::uint64_t modifier = 0;
     std::int32_t width = 0, height = 0;
+    /// Stable for the buffer's life, never reused (see DmabufLayout::buffer).
+    std::uint64_t id = 0;
 };
 
 using AnyBuffer = std::variant<ShmBuffer, DmabufBuffer>;
@@ -142,6 +144,8 @@ public:
         wm::OutputInfo output{"i4-0", {0, 0, 1920, 1080}};
         /// WAYLAND_DISPLAY for everything the session launches.
         std::string wayland_display = "wayland-i4";
+        /// Where launched apps' stdout/stderr go.
+        std::string app_log = "/dev/null";
     };
 
     Host(Options options, transport::Fd link_listener);
@@ -185,6 +189,8 @@ public:
     Event handle(const fx::Spawn& e);
 
 private:
+    /// A protocol object, as (client, object id).
+    using Key = std::pair<srv::Client*, id_t>;
     using Registration = jaal::platform::native_reactor::registration;
     struct HeadConn {
         transport::Channel channel;
@@ -208,6 +214,10 @@ private:
     void bind_subcompositor(srv::Client& c, std::uint32_t version, id_t id);
     void bind_decoration(srv::Client& c, std::uint32_t version, id_t id);
     void bind_dmabuf(srv::Client& c, std::uint32_t version, id_t id);
+    void bind_data_device_manager(srv::Client& c, std::uint32_t version, id_t id);
+    /// Offer the current selection to `c` (its data devices), or none.
+    void offer_selection(srv::Client& c);
+    void set_selection(std::optional<Key> source);
     void send_feedback(srv::Client& c, id_t feedback);
     void rebuild_format_table();
     void committed(Surface& s);
@@ -245,7 +255,6 @@ private:
     HeadId next_head_{1};
     std::uint32_t next_window_ = 1;
 
-    using Key = std::pair<srv::Client*, id_t>;
     std::map<Key, std::unique_ptr<Surface>> surfaces_;
     std::map<Key, AnyBuffer> buffers_;
     std::map<Key, Params> params_;
@@ -257,13 +266,29 @@ private:
     wl::OwnedFd format_table_;
     std::uint32_t format_table_size_ = 0;
     std::uint64_t main_device_ = 0;  // dev_t of the render node
+    std::optional<std::uint32_t> dmabuf_global_;  // the registry name, while advertised
+    std::uint64_t next_buffer_id_ = 1;
     std::vector<std::pair<srv::Client*, id_t>> feedbacks_;  // to re-send on change
     std::map<wm::WindowId, Key> windows_;
     struct Seat {
         std::vector<id_t> keyboards;
         std::vector<std::pair<id_t, std::uint32_t>> pointers;  // id, version
+        std::vector<id_t> data_devices;
     };
     std::map<srv::Client*, Seat> seats_;
+
+    // The clipboard. A source is a client's offer of data in some MIME
+    // types; the selection is at most one source; every other client reads
+    // it through its own wl_data_offer, created when it gains keyboard
+    // focus (what every compositor does: no snooping by unfocused clients).
+    struct DataSource {
+        std::vector<std::string> mime_types;
+    };
+    std::map<Key, DataSource> sources_;
+    std::optional<Key> selection_;
+    /// Offers handed out for the selection, so they can be told when it
+    /// changes (a stale offer's receive is dropped, not forwarded).
+    std::map<Key, Key> offers_;  // offer -> the source it reads
     Surface* keyboard_focus_ = nullptr;
     Surface* pointer_focus_ = nullptr;
     wm::Mods mods_;
