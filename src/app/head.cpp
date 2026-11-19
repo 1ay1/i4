@@ -101,8 +101,17 @@ int main(int argc, char** argv) {
     }
     auto window = std::move(*opened);
     if (fullscreen) {
-        if constexpr (requires { window.set_fullscreen(true); }) window.set_fullscreen(true);
-        else std::fprintf(stderr, "i4-head: this platform's window cannot go fullscreen yet\n");
+        // Through a template, so the check is on the type (not every
+        // platform's window can go fullscreen).
+        const bool ok = [](auto& w) {
+            if constexpr (requires { w.set_fullscreen(true); }) {
+                w.set_fullscreen(true);
+                return true;
+            } else {
+                return false;
+            }
+        }(window);
+        if (!ok) std::fprintf(stderr, "i4-head: this platform's window cannot go fullscreen yet\n");
     }
     if (cfg.fonts == nullptr) cfg.fonts = mayag::typo::system::default_stack();
 
