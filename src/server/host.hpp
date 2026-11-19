@@ -280,7 +280,13 @@ private:
         std::optional<transport::DatagramSocket::Peer> udp_peer;
         std::uint32_t next_frame = 0;
         std::uint64_t refreshes = 0;
+        /// up::Sequenced input: the next number to apply, and inputs that
+        /// arrived ahead of a gap (a datagram lost; its link copy is coming).
+        std::uint64_t next_input = 1;
+        std::map<std::uint64_t, link::up::Sequenced> early;
     };
+    /// One numbered input from either path: applied once, in order.
+    void sequenced(HeadId id, HeadConn& h, link::up::Sequenced s);
     /// Encode `window`'s content for remote head `id` and send it.
     void share_remote(HeadId id, HeadConn& h, wm::WindowId window);
     static constexpr std::size_t kBacklog = 256u << 10;  // bytes in flight before frames are skipped

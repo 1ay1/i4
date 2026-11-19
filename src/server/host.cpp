@@ -207,6 +207,11 @@ void Host::read_head(HeadId id) {
                 if (!r->window || *r->window == w) share_remote(id, h, w);
             continue;
         }
+        if (auto* s = std::get_if<link::up::Sequenced>(&*up)) {
+            sequenced(id, it->second, std::move(*s));
+            if (!heads_.contains(id)) return;
+            continue;
+        }
         emit(ev::HeadSaid{id, std::move(*up)});
         if (!heads_.contains(id)) return;  // the program dropped it
     }
@@ -353,16 +358,39 @@ void Host::read_udp() {
             if (!h.udp || h.udp->token() != *token) continue;
             // Only an authenticated datagram tells us where the head is (a
             // forged one cannot redirect its frames).
-            if (h.udp->open(d)) {
+            if (auto payload = h.udp->open(d)) {
                 if (!h.udp_peer) {
                     std::fprintf(stderr, "i4d: head %u: frames by datagram (UDP, FEC)\n", id.value);
                     // From here on its frames stand alone until it has them.
                     h.streams.clear();
                 }
                 h.udp_peer = from;
+                // Not a bare hello: numbered input, ahead of the link's copy.
+                if (!payload->empty())
+                    if (auto up = link::decode<link::Up>(*payload))
+                        if (auto* s = std::get_if<link::up::Sequenced>(&*up)) sequenced(id, h, std::move(*s));
             }
             break;
         }
+    }
+}
+
+void Host::sequenced(HeadId id, HeadConn& h, link::up::Sequenced s) {
+    if (s.seq < h.next_input) return;  // the other path's copy already went in
+    h.early.emplace(s.seq, std::move(s));
+    // Apply every input now in order. A gap waits for the link's copy, which
+    // is reliable and ordered, so it always comes.
+    while (!h.early.empty() && h.early.begin()->first == h.next_input) {
+        auto in = std::move(h.early.begin()->second.input);
+        h.early.erase(h.early.begin());
+        ++h.next_input;
+        std::visit([&](auto&& x) { emit(ev::HeadSaid{id, link::Up{std::move(x)}}); }, std::move(in));
+    }
+    // A head that restarted its numbering (it never does mid-connection) or
+    // a lost-forever gap must not hold input hostage: past 256 waiting, skip.
+    if (h.early.size() > 256) {
+        h.next_input = h.early.begin()->first;
+        sequenced(id, h, std::move(h.early.begin()->second));
     }
 }
 

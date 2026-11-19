@@ -59,7 +59,9 @@ Server::Reply Server::receive(const Up& u) {
         [&](const up::Released& r) -> Reply { return {.released = r}; },
         [&](const up::Caps& c) -> Reply { return {.caps = c}; },
         // The host keeps the frame streams; it acts on this itself.
-        [&](const up::Refresh&) -> Reply { return {}; });
+        [&](const up::Refresh&) -> Reply { return {}; },
+        // The host unwraps numbered input (dedupe, order) before it gets here.
+        [&](const up::Sequenced&) -> Reply { return {}; });
 }
 
 }  // namespace i4::link

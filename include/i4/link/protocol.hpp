@@ -163,11 +163,22 @@ struct Refresh {
     std::optional<wm::WindowId> window;
     friend bool operator==(const Refresh&, const Refresh&) = default;
 };
+/// Input, numbered, sent twice: by datagram (twice, ahead of anything the
+/// TCP link may be retransmitting) and on the link. The session applies the
+/// first copy of each number and drops the rest, so a key reaches the client
+/// at the speed of the faster path and never twice. Numbers rise by one per
+/// input; one that arrives with a gap below it waits (at most a few ms, for
+/// the link's copy) so input stays in order.
+struct Sequenced {
+    std::uint64_t seq = 0;
+    std::variant<Key, Modifiers, Motion, Button, Scroll> input;
+    friend bool operator==(const Sequenced&, const Sequenced&) = default;
+};
 }  // namespace up
 
 using Input = std::variant<up::Key, up::Keyboard, up::Modifiers, up::Motion, up::Button, up::Scroll>;
 using Up = std::variant<up::Hello, up::Request, up::Key, up::Motion, up::Button, up::Shown, up::Released, up::Caps,
-                        up::Keyboard, up::Modifiers, up::Scroll, up::Refresh>;
+                        up::Keyboard, up::Modifiers, up::Scroll, up::Refresh, up::Sequenced>;
 
 // -- server -> head ------------------------------------------------------------
 

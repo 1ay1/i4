@@ -465,7 +465,31 @@ public:
             // answer from when the key went down, by the kernel's clock.
             if (key_down_at_ && (!answer_due_ || *key_down_at_ < *answer_due_)) answer_due_ = key_down_at_;
         }
-        (void)link_.send(link::encode(s.message));
+        send_up(s.message);
+    }
+
+    /// Up a message goes. Input to a session across a network goes numbered,
+    /// by datagram twice (a lost one costs nothing, and none waits behind a
+    /// TCP retransmission) and on the link (reliable, ordered: the session
+    /// applies whichever copy is first). Everything else: the link.
+    void send_up(const link::Up& m) {
+        if (udp_ && udp_session_) {
+            std::optional<link::up::Sequenced> s;
+            std::visit(
+                [&]<class T>(const T& x) {
+                    if constexpr (requires { link::up::Sequenced{0, x}; }) s = link::up::Sequenced{++input_seq_, x};
+                },
+                m);
+            if (s) {
+                const auto bytes = link::encode(link::Up{*s});
+                const auto d = udp_session_->seal(bytes);
+                (void)udp_->send(d);
+                (void)udp_->send(udp_session_->seal(bytes));
+                (void)link_.send(bytes);
+                return;
+            }
+        }
+        (void)link_.send(link::encode(m));
     }
 
     /// I4_HEAD_PROBE=MS: every MS ms, type 'a' (press + release) into the
@@ -483,8 +507,8 @@ public:
         if (probe_sent_ && now - *probe_sent_ < std::chrono::milliseconds(every)) return;
         if (probe_sent_ && !probe_answered_) std::fprintf(stderr, "i4-head: probe unanswered\n");
         constexpr std::uint32_t kKeyA = 30;
-        (void)link_.send(link::encode(link::Up{link::up::Key{kKeyA, true, {}}}));
-        (void)link_.send(link::encode(link::Up{link::up::Key{kKeyA, false, {}}}));
+        send_up(link::Up{link::up::Key{kKeyA, true, {}}});
+        send_up(link::Up{link::up::Key{kKeyA, false, {}}});
         probe_sent_ = now;
         probe_answered_ = false;
         answer_due_ = std::chrono::duration<double>(now.time_since_epoch()).count();
@@ -719,6 +743,7 @@ private:
     std::optional<double> key_down_at_;  // the newest key press, kernel time (s)
     std::optional<std::chrono::steady_clock::time_point> probe_sent_;  // I4_HEAD_PROBE
     bool probe_answered_ = true;
+    std::uint64_t input_seq_ = 0;  // up::Sequenced numbers sent
     std::optional<double> answer_due_;   // the oldest press sent to a client and not yet answered
     std::vector<double> photon_;          // key -> photon samples (ms)
     struct Imported {
