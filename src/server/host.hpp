@@ -270,6 +270,9 @@ private:
         /// It takes video (up::Caps.video): GPU buffers go through the
         /// encoder, one stream per window.
         bool video = false;
+        /// Its decoder is hardware (up::Caps.video_hw). If not, every change
+        /// goes as tiles read off the GPU; video only when that fails.
+        bool video_hw = true;
         std::map<wm::WindowId, Encoder::StreamPtr> streams;
         /// Frames by datagram (secure remote heads): the session's keys, and
         /// where the head is, once it has said hello over UDP.

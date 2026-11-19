@@ -49,6 +49,10 @@ public:
     [[nodiscard]] std::optional<Picture> decode(const link::down::Video& v, std::int32_t width, std::int32_t height);
     /// Which decoder is in use ("hevc (videotoolbox)", "h264 (software)"), once open.
     [[nodiscard]] const std::string& name() const { return name_; }
+    /// Frames have come out, and none from the hardware: the platform's
+    /// decoder refused this stream (an M1 cannot do HEVC 4:4:4) and FFmpeg
+    /// fell back to software, whatever name() says it opened.
+    [[nodiscard]] bool software() const;
 
 private:
     struct Impl;

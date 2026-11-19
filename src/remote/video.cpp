@@ -104,7 +104,7 @@ struct Decoder::Impl {
     AVFrame* frame = av_frame_alloc();
     AVFrame* sw = av_frame_alloc();
     SwsContext* sws = nullptr;
-
+    std::uint64_t hw_frames = 0, sw_frames = 0;
     ~Impl() { close(); av_packet_free(&pkt); av_frame_free(&frame); av_frame_free(&sw); }
     void close() {
         avcodec_free_context(&ctx);
@@ -160,6 +160,7 @@ struct Decoder::Impl {
 
 Decoder::Decoder() : p_(std::make_unique<Impl>()) {}
 Decoder::~Decoder() = default;
+bool Decoder::software() const { return p_->sw_frames > 0 && p_->hw_frames == 0; }
 
 std::optional<Picture> Decoder::decode(const link::down::Video& v, std::int32_t width, std::int32_t height) {
     auto& p = *p_;
@@ -182,9 +183,12 @@ std::optional<Picture> Decoder::decode(const link::down::Video& v, std::int32_t 
         const auto t1 = std::chrono::steady_clock::now();
         AVFrame* f = p.frame;
         if (f->format == p.hw_format && p.hw_format != AV_PIX_FMT_NONE) {
+            ++p.hw_frames;
             av_frame_unref(p.sw);
             if (av_hwframe_transfer_data(p.sw, f, 0) < 0) continue;
             f = p.sw;
+        } else if (++p.sw_frames == 1 && p.hw_frames == 0 && name_.find("(software)") == std::string::npos) {
+            name_ = name_.substr(0, name_.find(' ')) + " (software)";
         }
         if (trace)
             std::fprintf(stderr, "i4-head: stage decode %.3f ms  download %.3f ms\n", ms(t0, t1),

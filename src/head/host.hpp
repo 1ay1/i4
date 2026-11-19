@@ -191,12 +191,18 @@ public:
                          lost.windows.size(), lost.unknown, asked ? "refresh asked" : "refresh already pending");
     }
 
-    /// Say hello on UDP (the session learns where frames go) and keep the
-    /// NAT binding open: at once, then every second.
+    /// Say hello on UDP (the session learns where frames go, and the NAT
+    /// binding stays open), at once and then every 50 ms. The rate is for
+    /// Wi-Fi: a client that sends nothing for a while dozes (power save,
+    /// AWDL off-channel on a Mac), the access point buffers its frames, and
+    /// it keeps only ~64: a keyframe of 700 datagrams lost all but 64, every
+    /// time the Mac had been idle. Measured on an M1: bursts arrive whole
+    /// with a datagram every 100 ms, 64 of 700 without. ~1 KB/s.
+    static constexpr std::chrono::milliseconds kHello{50};
     void udp_hello() {
         if (!udp_) return;
         const auto now = std::chrono::steady_clock::now();
-        if (last_hello_ && now - *last_hello_ < std::chrono::seconds(1)) return;
+        if (last_hello_ && now - *last_hello_ < kHello) return;
         last_hello_ = now;
         (void)udp_->send(udp_session_->seal({}));
     }
@@ -240,6 +246,14 @@ public:
                 auto& dec = decoders_[c->window];
                 if (!dec) dec = std::make_unique<remote::Decoder>();
                 if (auto pic = dec->decode(v, c->size.width, c->size.height)) {
+                    // The platform refused this stream and FFmpeg decodes it in
+                    // software (~50 ms a frame on an M1): tell the session once,
+                    // and it sends this head lossless tiles instead of video.
+                    if (dec->software() && !told_software_) {
+                        told_software_ = true;
+                        std::fprintf(stderr, "i4-head: video decodes in software here; asking for tiles instead\n");
+                        (void)link_.send(link::encode(link::Up{link::up::Caps{{}, true, false}}));
+                    }
                     // Only what changed goes to the GPU; the whole picture
                     // rides along for the first frame or a resize.
                     auto& last = pictures_[c->window];
@@ -328,6 +342,21 @@ public:
                     last_key_.reset();
                 }
             }
+            // I4_HEAD_VERIFY=1: hash the picture this head now holds for the
+            // window (B,G,R per pixel, like i4d's I4D_VERIFY), per generation.
+            if (static const bool verify = std::getenv("I4_HEAD_VERIFY") != nullptr; verify && c) {
+                if (auto it = pictures_.find(c->window); it != pictures_.end() && !it->second.rgba.empty()) {
+                    const auto& px = it->second.rgba;
+                    std::uint64_t hash = 1469598103934665603ull;
+                    for (std::size_t i = 0; i + 3 < px.size(); i += 4)
+                        for (std::size_t k : {2u, 1u, 0u}) {
+                            hash ^= px[i + k];
+                            hash *= 1099511628211ull;
+                        }
+                    std::fprintf(stderr, "i4-head: verify window %u gen %llu %016llx\n", c->window.value,
+                                 static_cast<unsigned long long>(c->generation), static_cast<unsigned long long>(hash));
+                }
+            }
             // The client answered: the next frame drawn shows it, and its
             // presentation closes the key's input-to-photon measurement.
             if (answer_due_ && std::holds_alternative<link::down::Content>(h.message)) {
@@ -372,6 +401,13 @@ public:
         if (gpu_busy_ || reassembly_.pending() || !broken_.empty()) {
             constexpr std::chrono::nanoseconds soon{1'000'000};
             hint = hint ? std::min(*hint, soon) : soon;
+        }
+        // Wake for the next hello: it keeps the radio awake (udp_hello).
+        if (udp_) {
+            const auto due = last_hello_ ? *last_hello_ + kHello - std::chrono::steady_clock::now()
+                                         : std::chrono::steady_clock::duration::zero();
+            const auto d = std::max(std::chrono::duration_cast<std::chrono::nanoseconds>(due), std::chrono::nanoseconds{0});
+            hint = hint ? std::min(*hint, d) : d;
         }
         return hint;
     }
@@ -668,6 +704,7 @@ private:
     std::map<wm::WindowId, std::unique_ptr<remote::Decoder>> decoders_;  // remote video, per window
     std::map<wm::WindowId, remote::Picture> pictures_;  // the last decoded picture, to diff against
     std::set<wm::WindowId> broken_;  // a video frame was lost: deltas wait for a keyframe
+    bool told_software_ = false;     // the session knows video decodes in software here
     /// Refreshes asked and not yet answered by a keyframe (see ask_refresh).
     std::map<wm::WindowId, std::optional<std::chrono::steady_clock::time_point>> asked_;
     std::optional<std::chrono::steady_clock::time_point> asked_all_;

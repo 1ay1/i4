@@ -612,7 +612,18 @@ struct Encoder::Impl {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, src);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        glFlush();
+        // The copy must have READ the client's buffer before we return: when
+        // nothing changed the host releases the buffer at once, and a client
+        // that draws its next frame into it before this copy ran (kitty does,
+        // with explicit sync) leaves `prev` holding THAT frame. The next diff
+        // then sees no change and the update is never sent: small updates
+        // (htop, a clock) vanished until input forced a bigger redraw.
+        if (GLsync done = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)) {
+            glClientWaitSync(done, GL_SYNC_FLUSH_COMMANDS_BIT, 50'000'000);  // 50 ms cap
+            glDeleteSync(done);
+        } else {
+            glFinish();
+        }
         return out;
     }
 

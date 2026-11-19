@@ -153,7 +153,7 @@ void Host::accept_head(const transport::Fd& listener, const transport::Key* key)
     next_head_ = next_head_.next();
     if (ch->remote() && !ch->secure() && key == nullptr)
         std::fprintf(stderr, "i4d: head %u connected over the network (unencrypted)\n", id.value);
-    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}, false, {}, std::nullopt, std::nullopt, 0, 0};
+    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}, false, true, {}, std::nullopt, std::nullopt, 0, 0};
     if (auto r = watch_(h.channel.fd(), jaal::interest::read, kHeadBase + id.value)) h.reg.emplace(std::move(*r));
     heads_.emplace(id, std::move(h));
     emit(ev::HeadJoined{id});
@@ -175,7 +175,13 @@ void Host::read_head(HeadId id) {
             drop_head(id);
             return;
         }
-        if (const auto* caps = std::get_if<link::up::Caps>(&*up)) it->second.video = caps->video && it->second.channel.remote();
+        if (const auto* caps = std::get_if<link::up::Caps>(&*up)) {
+            it->second.video = caps->video && it->second.channel.remote();
+            it->second.video_hw = caps->video_hw;
+            if (caps->video && !caps->video_hw)
+                std::fprintf(stderr, "i4d: head %u decodes video in software: big changes go as GPU-read tiles\n",
+                             id.value);
+        }
         if (std::holds_alternative<link::up::Hello>(*up) && it->second.channel.secure()) {
             std::fprintf(stderr, "i4d: head %u connected over the network (encrypted, key verified)\n", id.value);
             // Frames will go by datagram once it says hello on UDP too.
@@ -392,6 +398,21 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
                 // Which tiles really changed: compared on the GPU against the
                 // last frame this head got (clients often damage everything).
                 const auto flags = encoder_.changes(*stream, f);
+                // I4D_VERIFY=1: hash the whole frame as read off the GPU (B,G,R
+                // of each pixel), to compare with what the head ends up holding
+                // (I4_HEAD_VERIFY). Costs a full readback: debugging only.
+                if (static const bool verify = std::getenv("I4D_VERIFY") != nullptr; verify) {
+                    if (auto all = encoder_.read(f, {{0, 0, buf.width, buf.height}})) {
+                        std::uint64_t hash = 1469598103934665603ull;
+                        for (std::size_t i = 0; i + 3 < all->size(); i += 4)
+                            for (std::size_t k = 0; k < 3; ++k) {
+                                hash ^= std::to_integer<std::uint8_t>((*all)[i + k]);
+                                hash *= 1099511628211ull;
+                            }
+                        std::fprintf(stderr, "i4d: verify window %u gen %llu %016llx\n", window.value,
+                                     static_cast<unsigned long long>(gen), static_cast<unsigned long long>(hash));
+                    }
+                }
                 if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr) {
                     std::size_t n = 0;
                     if (flags) for (auto x : *flags) n += x;
@@ -414,7 +435,10 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
                         return;
                     }
                     const auto total = static_cast<std::uint64_t>(buf.width) * static_cast<std::uint64_t>(buf.height);
-                    if (r.area * 4 < total) {
+                    // A head without a hardware decoder gets tiles for ANY
+                    // change: read off this GPU and zstd'd, ~5 ms both ends,
+                    // where it would spend ~50 ms decoding HEVC in software.
+                    if (r.area * 4 < total || !h.video_hw) {
                         constexpr std::uint32_t ar24 = 0x34325241, ab24 = 0x34324241;
                         if (auto px = encoder_.read(f, r.rects))
                             enc = remote::pack(r, *px, buf.fourcc == ar24 || buf.fourcc == ab24);

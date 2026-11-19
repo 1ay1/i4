@@ -150,6 +150,11 @@ struct Caps {
     /// layout the SESSION's GPU can encode from, not only what this head
     /// could sample (a remote head samples nothing).
     bool video = false;
+    /// Its video decoder is hardware. A head whose decoder fell back to
+    /// software (an M1 cannot decode lossless HEVC 4:4:4) says false, and
+    /// is sent changed tiles read off the session's GPU even for big
+    /// changes: a few ms where software HEVC costs ~50 ms a frame.
+    bool video_hw = true;
     friend bool operator==(const Caps&, const Caps&) = default;
 };
 /// A frame sent by datagram (see remote/frames.hpp) was lost beyond repair:
