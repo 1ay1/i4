@@ -76,6 +76,8 @@ option(I4_WITH_SESSION "Build i4d (Linux)" ${I4_SESSION_DEFAULT})
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+# Every link across a network is encrypted and authenticated (transport).
+pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 # Video for heads across a network: FFmpeg decodes on every head platform.
 pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
 if(I4_WITH_SESSION)
@@ -90,7 +92,7 @@ endif()
 # Moving link messages between processes: a local SOCK_SEQPACKET channel with
 # fds riding alongside, or TCP (tcp:HOST:PORT) to a head on another machine.
 add_library(i4_transport STATIC src/transport/channel.cpp)
-target_link_libraries(i4_transport PUBLIC i4::link jaal::jaal PRIVATE i4_warnings)
+target_link_libraries(i4_transport PUBLIC i4::link jaal::jaal PRIVATE PkgConfig::SODIUM i4_warnings)
 
 # -- remote: frames as bytes, for a head across a network (portable) ---------------
 add_library(i4_remote STATIC src/remote/tiles.cpp src/remote/video.cpp)

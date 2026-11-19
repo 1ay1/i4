@@ -111,9 +111,9 @@ void Host::ready(const jaal::readiness& r) {
         if (auto st = s->staged.find(n); st != s->staged.end()) st->second.wait = 0;
         acquired(*s, n);
     } else if (r.token == kListener) {
-        accept_head(listener_);
+        accept_head(listener_, nullptr);
     } else if (r.token == kRemoteListener) {
-        accept_head(remote_listener_);
+        accept_head(remote_listener_, &options_.remote_key);
     }
 }
 
@@ -135,12 +135,13 @@ void Host::flush() {
 
 // -- heads ---------------------------------------------------------------------
 
-void Host::accept_head(const transport::Fd& listener) {
-    auto ch = transport::Channel::accept(listener);
+void Host::accept_head(const transport::Fd& listener, const transport::Key* key) {
+    auto ch = transport::Channel::accept(listener, key);
     if (!ch) return;
     const auto id = next_head_;
     next_head_ = next_head_.next();
-    if (ch->remote()) std::fprintf(stderr, "i4d: head %u connected over the network\n", id.value);
+    if (ch->remote() && !ch->secure() && key == nullptr)
+        std::fprintf(stderr, "i4d: head %u connected over the network (unencrypted)\n", id.value);
     HeadConn h{std::move(*ch), std::nullopt, false, {}, {}, false, {}};
     if (auto r = watch_(h.channel.fd(), jaal::interest::read, kHeadBase + id.value)) h.reg.emplace(std::move(*r));
     heads_.emplace(id, std::move(h));
@@ -164,6 +165,8 @@ void Host::read_head(HeadId id) {
             return;
         }
         if (const auto* caps = std::get_if<link::up::Caps>(&*up)) it->second.video = caps->video && it->second.channel.remote();
+        if (std::holds_alternative<link::up::Hello>(*up) && it->second.channel.secure())
+            std::fprintf(stderr, "i4d: head %u connected over the network (encrypted, key verified)\n", id.value);
         emit(ev::HeadSaid{id, std::move(*up)});
         if (!heads_.contains(id)) return;  // the program dropped it
     }

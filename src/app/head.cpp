@@ -43,17 +43,38 @@ int main(int argc, char** argv) {
     using namespace i4;
     const char* runtime = std::getenv("XDG_RUNTIME_DIR");
     std::string path = std::string(runtime ? runtime : "/tmp") + "/i4-link";
+    std::string key_arg;
     head::options.terminal = find_terminal();
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
         if (a == "--super") head::options.mod = wm::Mod::super;
         else if (a == "--link" && i + 1 < argc) path = argv[++i];
+        else if (a == "--key" && i + 1 < argc) key_arg = argv[++i];
         else if (a == "--terminal" && i + 1 < argc) head::options.terminal = argv[++i];
     }
 
-    auto link = transport::Channel::connect(path);
+    // Across a network the link is encrypted, with the session's pairing
+    // key: --key HEX, or --key FILE, or $I4_KEY, or ~/.config/i4/remote.key.
+    std::optional<transport::Key> key;
+    if (transport::Channel::is_tcp(path)) {
+        if (key_arg.empty())
+            if (const char* e = std::getenv("I4_KEY"); e && *e) key_arg = e;
+        if (!key_arg.empty()) key = transport::parse_key(key_arg);
+        if (!key) key = transport::load_key(key_arg.empty() ? transport::default_key_path() : key_arg, false);
+        if (!key) {
+            std::fprintf(stderr,
+                         "i4-head: a network session needs its pairing key: --key HEX (i4d prints it when started "
+                         "with --remote), or put it in %s\n",
+                         transport::default_key_path().c_str());
+            return 1;
+        }
+    }
+    auto link = transport::Channel::connect(path, key ? &*key : nullptr);
     if (!link) {
-        std::fprintf(stderr, "i4-head: no session at %s (start i4d first)\n", path.c_str());
+        if (key && link.error() == transport::ChannelError::io)
+            std::fprintf(stderr, "i4-head: the session at %s refused this key (wrong pairing key?)\n", path.c_str());
+        else
+            std::fprintf(stderr, "i4-head: no session at %s (start i4d first)\n", path.c_str());
         return 1;
     }
 

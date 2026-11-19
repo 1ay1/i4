@@ -2,11 +2,17 @@
 #include "channel.hpp"
 
 #include <array>
+#include <cctype>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 
 #include <fcntl.h>
+#include <poll.h>
+#include <sodium.h>
 #if defined(__linux__)
 #include <linux/sockios.h>
 #endif
@@ -91,9 +97,12 @@ std::unique_ptr<addrinfo, AddrinfoFree> resolve(const std::string& host, const s
     return std::unique_ptr<addrinfo, AddrinfoFree>{out};
 }
 
-/// Interactive traffic: every packet leaves at once (no Nagle), the kernel
-/// buffers are big enough for a frame at link speed, and a dead peer is
-/// noticed (keepalive) rather than waited on forever.
+/// Interactive traffic: every packet leaves at once (no Nagle); the kernel
+/// keeps at most a little UNSENT data (TCP_NOTSENT_LOWAT), so a frame never
+/// queues behind seconds of stale ones and the sender's skip-when-behind
+/// sees the real backlog; buffers autotune for throughput; packets are
+/// marked low-delay (DSCP EF) for networks that honour it; and a dead peer
+/// is noticed (keepalive) rather than waited on forever.
 void tune(int fd) {
     const int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -106,9 +115,18 @@ void tune(int fd) {
 #endif
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
-    const int buf = 8 << 20;
-    ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+#if defined(TCP_NOTSENT_LOWAT)
+    const int lowat = 64 << 10;
+    ::setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lowat, sizeof(lowat));
+#endif
+    const int ef = 0xb8;  // DSCP 46 (expedited forwarding) << 2
+    ::setsockopt(fd, IPPROTO_IP, IP_TOS, &ef, sizeof(ef));
+#if defined(IPV6_TCLASS)
+    ::setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &ef, sizeof(ef));
+#endif
+#if defined(TCP_QUICKACK)
+    ::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+#endif
 }
 
 bool is_stream(int fd) {
@@ -126,12 +144,188 @@ std::uint32_t get_u32(const std::byte* p) {
     return v;
 }
 
+// -- the secure link -------------------------------------------------------------
+//
+// Every TCP link is encrypted and both ends authenticated, with nothing to
+// set up but one shared pairing key (i4d makes it; you give it to a head):
+//
+//   head -> i4d    "i4s1" + an ephemeral X25519 public key
+//   i4d  -> head   "i4s1" + its ephemeral public key + an empty sealed box
+//
+// Both derive the session keys from the X25519 exchange (forward secrecy:
+// a later leak of the pairing key does not open recorded sessions) MIXED
+// with the pairing key (only someone who has it derives the same keys, so a
+// man in the middle gets nothing). The empty box proves the session to the
+// head before connect() returns; the head's first packet (Hello) proves
+// itself to i4d, and nothing it says is believed before that. Then every
+// packet is ChaCha20-Poly1305 with a per-direction counter as nonce: TCP is
+// in order, so a replayed, dropped or reordered packet fails to decrypt and
+// the link closes. ~16 bytes and microseconds per packet.
+
+constexpr std::size_t kHello = 4 + crypto_kx_PUBLICKEYBYTES;
+constexpr std::size_t kTag = crypto_aead_chacha20poly1305_ietf_ABYTES;
+
+bool sodium() {
+    static const bool ok = ::sodium_init() >= 0;
+    return ok;
+}
+
+}  // namespace
+
+struct Channel::Secure {
+    bool server = false;
+    bool ready = false;
+    Key psk{};
+    std::array<unsigned char, crypto_kx_PUBLICKEYBYTES> pk{};
+    std::array<unsigned char, crypto_kx_SECRETKEYBYTES> sk{};
+    std::array<unsigned char, 32> tx{}, rx{};
+    std::uint64_t tx_n = 0, rx_n = 0;
+    ~Secure() {
+        sodium_memzero(sk.data(), sk.size());
+        sodium_memzero(tx.data(), tx.size());
+        sodium_memzero(rx.data(), rx.size());
+        sodium_memzero(psk.data(), psk.size());
+    }
+
+    /// Session keys from the exchange, mixed with the pairing key and the
+    /// transcript (both public keys).
+    bool derive(const unsigned char* client_pk, const unsigned char* server_pk, const unsigned char* peer_pk) {
+        std::array<unsigned char, 32> r{}, t{};
+        const int rc = server ? crypto_kx_server_session_keys(r.data(), t.data(), pk.data(), sk.data(), peer_pk)
+                              : crypto_kx_client_session_keys(r.data(), t.data(), pk.data(), sk.data(), peer_pk);
+        if (rc != 0) return false;
+        auto mix = [&](const std::array<unsigned char, 32>& k, std::array<unsigned char, 32>& out) {
+            crypto_generichash_state st;
+            crypto_generichash_init(&st, psk.data(), psk.size(), out.size());
+            crypto_generichash_update(&st, k.data(), k.size());
+            crypto_generichash_update(&st, client_pk, crypto_kx_PUBLICKEYBYTES);
+            crypto_generichash_update(&st, server_pk, crypto_kx_PUBLICKEYBYTES);
+            crypto_generichash_final(&st, out.data(), out.size());
+        };
+        mix(r, rx);
+        mix(t, tx);
+        sodium_memzero(r.data(), r.size());
+        sodium_memzero(t.data(), t.size());
+        sodium_memzero(sk.data(), sk.size());
+        return true;
+    }
+
+    static void nonce(std::uint64_t n, unsigned char* out) {
+        std::memset(out, 0, crypto_aead_chacha20poly1305_ietf_NPUBBYTES);
+        for (int i = 0; i < 8; ++i) out[4 + i] = static_cast<unsigned char>(n >> (8 * i));
+    }
+    std::vector<std::byte> seal(const std::vector<std::byte>& m) {
+        std::vector<std::byte> c(m.size() + kTag);
+        unsigned char nn[crypto_aead_chacha20poly1305_ietf_NPUBBYTES];
+        nonce(tx_n++, nn);
+        unsigned long long len = 0;
+        crypto_aead_chacha20poly1305_ietf_encrypt(reinterpret_cast<unsigned char*>(c.data()), &len,
+                                                  reinterpret_cast<const unsigned char*>(m.data()), m.size(), nullptr,
+                                                  0, nullptr, nn, tx.data());
+        c.resize(static_cast<std::size_t>(len));
+        return c;
+    }
+    std::optional<std::vector<std::byte>> open(const std::byte* c, std::size_t n) {
+        if (n < kTag) return std::nullopt;
+        std::vector<std::byte> m(n - kTag);
+        unsigned char nn[crypto_aead_chacha20poly1305_ietf_NPUBBYTES];
+        nonce(rx_n, nn);
+        unsigned long long len = 0;
+        if (crypto_aead_chacha20poly1305_ietf_decrypt(reinterpret_cast<unsigned char*>(m.data()), &len, nullptr,
+                                                      reinterpret_cast<const unsigned char*>(c), n, nullptr, 0, nn,
+                                                      rx.data()) != 0)
+            return std::nullopt;
+        ++rx_n;
+        m.resize(static_cast<std::size_t>(len));
+        return m;
+    }
+};
+
+std::optional<Key> parse_key(const std::string& hex) {
+    std::string s;
+    for (char ch : hex)
+        if (!std::isspace(static_cast<unsigned char>(ch))) s += ch;
+    Key k{};
+    std::size_t len = 0;
+    if (s.size() != 64 || ::sodium_hex2bin(k.data(), k.size(), s.c_str(), s.size(), nullptr, &len, nullptr) != 0 ||
+        len != k.size())
+        return std::nullopt;
+    return k;
+}
+
+std::string key_hex(const Key& k) {
+    std::array<char, 65> out{};
+    ::sodium_bin2hex(out.data(), out.size(), k.data(), k.size());
+    return out.data();
+}
+
+std::string default_key_path() {
+    if (const char* x = std::getenv("XDG_CONFIG_HOME"); x && *x) return std::string(x) + "/i4/remote.key";
+    const char* home = std::getenv("HOME");
+    return std::string(home ? home : ".") + "/.config/i4/remote.key";
+}
+
+std::optional<Key> load_key(const std::string& path, bool create) {
+    if (!sodium()) return std::nullopt;
+    if (std::FILE* f = std::fopen(path.c_str(), "r")) {
+        char buf[256] = {};
+        const auto n = std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        return parse_key(std::string(buf, n));
+    }
+    if (!create) return std::nullopt;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    Key k{};
+    ::randombytes_buf(k.data(), k.size());
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return std::nullopt;
+    const auto text = key_hex(k) + "\n";
+    const bool ok = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
+    ::close(fd);
+    if (!ok) return std::nullopt;
+    return k;
+}
+
+namespace {
+
+/// Read exactly `n` bytes from a blocking socket, giving up after `ms`.
+bool read_exact(int fd, std::byte* p, std::size_t n, int ms) {
+    while (n > 0) {
+        pollfd pf{fd, POLLIN, 0};
+        if (::poll(&pf, 1, ms) <= 0) return false;
+        const ssize_t r = ::recv(fd, p, n, 0);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            return false;
+        }
+        p += r;
+        n -= static_cast<std::size_t>(r);
+    }
+    return true;
+}
+
+bool write_all(int fd, const std::byte* p, std::size_t n) {
+    while (n > 0) {
+        const ssize_t r = ::send(fd, p, n, MSG_NOSIGNAL);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            return false;
+        }
+        p += r;
+        n -= static_cast<std::size_t>(r);
+    }
+    return true;
+}
+
 }  // namespace
 
 Channel::Channel(Fd socket) : socket_(std::move(socket)) {
     stream_ = socket_ && is_stream(socket_.get());
     if (stream_) tune(socket_.get());
 }
+
+bool Channel::secure() const { return secure_ && secure_->ready; }
 
 std::expected<std::pair<Channel, Channel>, ChannelError> Channel::pair() {
     int fds[2];
@@ -171,13 +365,20 @@ std::expected<Fd, ChannelError> Channel::listen(const std::string& path) {
     return s;
 }
 
-std::expected<Channel, ChannelError> Channel::accept(const Fd& listener) {
+std::expected<Channel, ChannelError> Channel::accept(const Fd& listener, const Key* key) {
     const int c = accept_nb(listener.get());
     if (c < 0) return std::unexpected(ChannelError::io);
-    return Channel{Fd{c}};
+    Channel ch{Fd{c}};
+    if (ch.stream_ && key) {
+        if (!sodium()) return std::unexpected(ChannelError::io);
+        ch.secure_ = std::make_shared<Secure>();
+        ch.secure_->server = true;
+        ch.secure_->psk = *key;
+    }
+    return ch;
 }
 
-std::expected<Channel, ChannelError> Channel::connect(const std::string& path) {
+std::expected<Channel, ChannelError> Channel::connect(const std::string& path, const Key* key) {
     if (is_tcp(path)) {
         const auto hp = split_tcp(path);
         if (!hp) return std::unexpected(ChannelError::io);
@@ -189,8 +390,33 @@ std::expected<Channel, ChannelError> Channel::connect(const std::string& path) {
             // Blocking connect (a head has nothing to do until it is
             // connected), then non-blocking like every other channel.
             if (::connect(s.get(), a->ai_addr, a->ai_addrlen) != 0) continue;
+            std::shared_ptr<Secure> sec;
+            if (key) {
+                if (!sodium()) return std::unexpected(ChannelError::io);
+                sec = std::make_shared<Secure>();
+                sec->psk = *key;
+                crypto_kx_keypair(sec->pk.data(), sec->sk.data());
+                std::array<std::byte, 4 + kHello> hello{};
+                put_u32(hello.data(), kHello);
+                std::memcpy(hello.data() + 4, "i4s1", 4);
+                std::memcpy(hello.data() + 8, sec->pk.data(), sec->pk.size());
+                std::array<std::byte, 4 + kHello + kTag> reply{};
+                if (!write_all(s.get(), hello.data(), hello.size()) ||
+                    !read_exact(s.get(), reply.data(), reply.size(), 5000) ||
+                    get_u32(reply.data()) != kHello + kTag || std::memcmp(reply.data() + 4, "i4s1", 4) != 0)
+                    return std::unexpected(ChannelError::closed);
+                const auto* server_pk = reinterpret_cast<const unsigned char*>(reply.data() + 8);
+                // A wrong key derives different keys: the session's sealed
+                // empty box will not open.
+                if (!sec->derive(sec->pk.data(), server_pk, server_pk) ||
+                    !sec->open(reply.data() + 4 + kHello, kTag))
+                    return std::unexpected(ChannelError::io);
+                sec->ready = true;
+            }
             ::fcntl(s.get(), F_SETFL, ::fcntl(s.get(), F_GETFL) | O_NONBLOCK);
-            return Channel{std::move(s)};
+            Channel ch{std::move(s)};
+            ch.secure_ = std::move(sec);
+            return ch;
         }
         return std::unexpected(ChannelError::closed);
     }
@@ -205,16 +431,47 @@ std::expected<Channel, ChannelError> Channel::connect(const std::string& path) {
     return Channel{std::move(s)};
 }
 
+std::expected<void, ChannelError> Channel::queue_frame(const std::vector<std::byte>& payload) {
+    if (payload.size() > max_stream_packet + kTag) return std::unexpected(ChannelError::too_big);
+    std::vector<std::byte> framed(4 + payload.size());
+    put_u32(framed.data(), static_cast<std::uint32_t>(payload.size()));
+    std::memcpy(framed.data() + 4, payload.data(), payload.size());
+    out_.push_back({std::move(framed), {}});
+    return flush();
+}
+
+std::expected<bool, ChannelError> Channel::handshake_server(const std::vector<std::byte>& hello) {
+    auto& s = *secure_;
+    if (hello.size() != kHello || std::memcmp(hello.data(), "i4s1", 4) != 0) return std::unexpected(ChannelError::io);
+    const auto* client_pk = reinterpret_cast<const unsigned char*>(hello.data() + 4);
+    crypto_kx_keypair(s.pk.data(), s.sk.data());
+    const auto server_pk = s.pk;
+    if (!s.derive(client_pk, server_pk.data(), client_pk)) return std::unexpected(ChannelError::io);
+    std::vector<std::byte> reply(kHello);
+    std::memcpy(reply.data(), "i4s1", 4);
+    std::memcpy(reply.data() + 4, server_pk.data(), server_pk.size());
+    const auto proof = s.seal({});
+    reply.insert(reply.end(), proof.begin(), proof.end());
+    if (auto r = queue_frame(reply); !r) return std::unexpected(r.error());
+    s.ready = true;
+    for (auto& early : std::exchange(early_, {}))
+        if (auto r = queue_frame(s.seal(early)); !r) return std::unexpected(r.error());
+    return true;
+}
+
 std::expected<void, ChannelError> Channel::send(std::vector<std::byte> bytes, std::vector<Fd> fds) {
     if (stream_) {
         // No fds cross a network; the owner never offers any to a remote
         // channel (it sends pixels instead). Framed: u32 length, then bytes.
         if (bytes.size() > max_stream_packet || !fds.empty()) return std::unexpected(ChannelError::too_big);
-        std::vector<std::byte> framed(4 + bytes.size());
-        put_u32(framed.data(), static_cast<std::uint32_t>(bytes.size()));
-        std::memcpy(framed.data() + 4, bytes.data(), bytes.size());
-        out_.push_back({std::move(framed), {}});
-        return flush();
+        if (secure_) {
+            if (!secure_->ready) {
+                early_.push_back(std::move(bytes));
+                return {};
+            }
+            return queue_frame(secure_->seal(bytes));
+        }
+        return queue_frame(bytes);
     }
     if (bytes.size() > max_packet || fds.size() > max_fds) return std::unexpected(ChannelError::too_big);
     out_.push_back({std::move(bytes), std::move(fds)});
@@ -307,11 +564,22 @@ std::expected<std::vector<Packet>, ChannelError> Channel::receive() {
         std::size_t at = 0;
         while (in_.size() - at >= 4) {
             const auto len = get_u32(in_.data() + at);
-            if (len > max_stream_packet) return std::unexpected(ChannelError::too_big);
+            if (len > max_stream_packet + kTag) return std::unexpected(ChannelError::too_big);
+            // Before the handshake only a hello may arrive: refuse anything
+            // bigger at once (a stranger cannot make us buffer megabytes).
+            if (secure_ && !secure_->ready && len != kHello) return std::unexpected(ChannelError::io);
             if (in_.size() - at - 4 < len) break;
-            out.push_back({std::vector<std::byte>(in_.begin() + static_cast<std::ptrdiff_t>(at + 4),
-                                                  in_.begin() + static_cast<std::ptrdiff_t>(at + 4 + len)),
-                           {}});
+            const auto* body = in_.data() + at + 4;
+            if (!secure_) {
+                out.push_back({std::vector<std::byte>(body, body + len), {}});
+            } else if (!secure_->ready) {
+                if (auto r = handshake_server(std::vector<std::byte>(body, body + len)); !r)
+                    return std::unexpected(r.error());
+            } else {
+                auto m = secure_->open(body, len);
+                if (!m) return std::unexpected(ChannelError::io);  // forged, replayed, or the wrong key
+                out.push_back({std::move(*m), {}});
+            }
             at += 4 + len;
         }
         in_.erase(in_.begin(), in_.begin() + static_cast<std::ptrdiff_t>(at));

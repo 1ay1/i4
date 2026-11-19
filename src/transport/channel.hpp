@@ -29,9 +29,11 @@
 // far behind the network is (queued here + still in the kernel's buffer),
 // which is what lets a sender drop stale frames instead of queueing them.
 
+#include <array>
 #include <cstddef>
 #include <deque>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -50,6 +52,19 @@ struct Packet {
 
 enum class ChannelError : std::uint8_t { closed, io, too_big };
 
+/// The pairing key: 32 random bytes shared by a session and the heads it
+/// lets in over the network. Every TCP link is encrypted and authenticated
+/// with it (see channel.cpp, "the secure link"): no ssh needed.
+using Key = std::array<std::uint8_t, 32>;
+/// 64 hex characters <-> a key.
+[[nodiscard]] std::optional<Key> parse_key(const std::string& hex);
+[[nodiscard]] std::string key_hex(const Key& k);
+/// The key in `path` (64 hex chars); with `create`, a new random one is
+/// written there (mode 0600, parent made) when there is none.
+[[nodiscard]] std::optional<Key> load_key(const std::string& path, bool create);
+/// Where it lives by default: $XDG_CONFIG_HOME/i4/remote.key (~/.config/...).
+[[nodiscard]] std::string default_key_path();
+
 class Channel {
 public:
     Channel() = default;
@@ -61,8 +76,13 @@ public:
     /// Listen on an address: a path (a stale one is unlinked first) or
     /// tcp:HOST:PORT. Accept one end.
     [[nodiscard]] static std::expected<Fd, ChannelError> listen(const std::string& address);
-    [[nodiscard]] static std::expected<Channel, ChannelError> accept(const Fd& listener);
-    [[nodiscard]] static std::expected<Channel, ChannelError> connect(const std::string& address);
+    /// With `key`, a TCP connection must prove it has the key before a
+    /// single byte of it is believed (the handshake runs in receive()).
+    [[nodiscard]] static std::expected<Channel, ChannelError> accept(const Fd& listener, const Key* key = nullptr);
+    /// With `key`, the secure handshake completes (bounded, a few seconds)
+    /// before this returns: a wrong key is an error here, not later.
+    [[nodiscard]] static std::expected<Channel, ChannelError> connect(const std::string& address,
+                                                                      const Key* key = nullptr);
     /// tcp:HOST:PORT (the network) rather than a local path.
     [[nodiscard]] static bool is_tcp(const std::string& address) { return address.starts_with("tcp:"); }
 
@@ -80,6 +100,8 @@ public:
     [[nodiscard]] bool open() const { return socket_.valid(); }
     /// Across a network: no fds, so frames travel as bytes.
     [[nodiscard]] bool remote() const { return stream_; }
+    /// Encrypted and authenticated (the handshake is done).
+    [[nodiscard]] bool secure() const;
     /// Bytes sent but not yet on the wire: queued here plus what the kernel
     /// still holds. A frame sender skips frames while this is large.
     [[nodiscard]] std::size_t unsent() const;
@@ -90,11 +112,19 @@ public:
     static constexpr std::size_t max_stream_packet = 96u << 20;
 
 private:
+    struct Secure;
+    std::expected<void, ChannelError> queue_frame(const std::vector<std::byte>& payload);
+    std::expected<bool, ChannelError> handshake_server(const std::vector<std::byte>& hello);
+
     Fd socket_;
     std::deque<Packet> out_;
     bool stream_ = false;
     std::size_t written_ = 0;          // stream: bytes of out_.front() (with its header) already sent
     std::vector<std::byte> in_;        // stream: bytes read, not yet a whole packet
+    /// The secure link's keys and counters (shared_ptr: Channel stays movable
+    /// with Secure defined only in channel.cpp).
+    std::shared_ptr<Secure> secure_;
+    std::vector<std::vector<std::byte>> early_;  // sent before the handshake finished
 };
 
 }  // namespace i4::transport

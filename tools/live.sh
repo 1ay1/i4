@@ -49,16 +49,24 @@ teardown() {
 }
 trap teardown EXIT INT TERM
 
-remote="" headlink=$link
-if [ -n "$port" ]; then remote="--remote tcp:127.0.0.1:$port"; headlink=tcp:127.0.0.1:$port; fi
+# -r: i4d listens on EVERY address with a throwaway pairing key, and the head
+# connects to this machine's LAN address directly (no tunnel), as a head on
+# another machine would. I4_LIVE_HOST overrides the address.
+remote="" headlink=$link keyopt=""
+if [ -n "$port" ]; then
+    host=${I4_LIVE_HOST:-$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}')}
+    host=${host:-127.0.0.1}
+    keyfile=$out/remote.key; rm -f $keyfile
+    remote="--remote tcp::$port --key $keyfile"; headlink=tcp:$host:$port; keyopt="--key $keyfile"
+fi
 start i4d env I4D_TRACE=1 timeout $((secs + 2)) $bin/i4d --socket $sock --link $link $remote
 i=0; until [ -S $link ] || [ $i -ge 50 ]; do sleep 0.05; i=$((i + 1)); done
 [ -S $link ] || { echo "live: i4d did not start"; cat $out/i4d.log; exit 1; }
 if [ -n "$port" ]; then
-    i=0; until grep -q "remote tcp" $out/i4d.log 2>/dev/null || [ $i -ge 50 ]; do sleep 0.05; i=$((i + 1)); done
+    i=0; until [ -s $keyfile ] && grep -q "pairing key" $out/i4d.log 2>/dev/null || [ $i -ge 50 ]; do sleep 0.05; i=$((i + 1)); done
 fi
 
-start head env $envs I4_HEAD_TRACE=1 timeout $((secs + 1)) $bin/i4-head --link $headlink
+start head env $envs I4_HEAD_TRACE=1 timeout $((secs + 1)) $bin/i4-head --link $headlink $keyopt
 i=0; until grep -q 'GPU ready' $out/head.log 2>/dev/null || [ $i -ge 60 ]; do sleep 0.05; i=$((i + 1)); done
 
 [ $# -gt 0 ] && start client env WAYLAND_DISPLAY=$sock I4_LINK=$link timeout $secs "$@"

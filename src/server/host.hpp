@@ -202,6 +202,8 @@ public:
         std::string app_log = "/dev/null";
         /// Heads across a network connect here (tcp:HOST:PORT), if given.
         std::string remote;
+        /// The pairing key every remote head must have (transport::Key).
+        transport::Key remote_key{};
     };
 
     Host(Options options, transport::Fd link_listener);
@@ -319,7 +321,7 @@ private:
     void release_held(Surface& s, std::uint64_t shown);
 
     // heads (host.cpp)
-    void accept_head(const transport::Fd& listener);
+    void accept_head(const transport::Fd& listener, const transport::Key* key);
     void read_head(HeadId id);
     void drop_head(HeadId id);
     void rewatch(HeadId id);
