@@ -120,6 +120,50 @@ TEST(an_unbound_key_goes_to_the_client_as_evdev) {
     CHECK_EQ(wm::shape(h.model().replica.shown()), std::string("H[a b*]"));
 }
 
+TEST(with_a_raw_keyboard_a_held_key_stays_held) {
+    H h;
+    welcome(h);
+    (void)said(h);
+    h.send(KeymapInput{"xkb_keymap { };"});
+    CHECK((said(h) == std::vector<link::Up>{link::up::Keyboard{"xkb_keymap { };", 25, 600}}));
+    const mayag::KeyEvent a{mayag::Key::a, {}};
+    h.send(KeyInput{30, true, a});
+    h.send(mayag::KeyEvent{a});  // mayag's own reading of the same press: not sent twice
+    h.send(KeyInput{30, true, a});  // a platform repeat: the client repeats on its own
+    auto s = said(h);
+    CHECK_EQ(s.size(), 1u);
+    CHECK((s.size() == 1 && s.front() == link::Up{link::up::Key{30, true, {}}}));
+    h.send(KeyInput{30, false, a});
+    s = said(h);
+    CHECK((s.size() == 1 && s.front() == link::Up{link::up::Key{30, false, {}}}));
+}
+
+TEST(a_binding_key_never_reaches_the_client_not_even_its_release) {
+    H h;
+    welcome(h);
+    (void)said(h);
+    h.send(KeymapInput{"k"});
+    (void)said(h);
+    h.send(KeyInput{35, true, mayag::KeyEvent{mayag::Key::h, mayag::Mods{.alt = true}}});
+    auto s = said(h);
+    CHECK(s.size() == 1 && is<link::up::Request>(s.front()));
+    h.send(KeyInput{35, false, mayag::KeyEvent{mayag::Key::h, mayag::Mods{.alt = true}}});
+    CHECK(said(h).empty());
+}
+
+TEST(losing_the_keyboard_releases_what_is_held) {
+    H h;
+    welcome(h);
+    (void)said(h);
+    h.send(KeymapInput{"k"});
+    h.send(KeyInput{42, true, mayag::KeyEvent{mayag::Key::unknown, mayag::Mods{.shift = true}}});
+    h.send(ModsInput{{1, 0, 0, 0}});
+    (void)said(h);
+    h.send(KeyboardLeft{});
+    const auto s = said(h);
+    CHECK((s == std::vector<link::Up>{link::up::Key{42, false, {}}, link::up::Modifiers{0, 0, 0, 0}}));
+}
+
 TEST(a_frame_is_uploaded_and_acknowledged) {
     H h;
     welcome(h);

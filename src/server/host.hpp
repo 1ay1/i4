@@ -192,6 +192,9 @@ public:
     void handle(const fx::KeyboardFocus& e);
     void handle(const fx::PointerAt& e);
     void handle(const fx::Key& e);
+    void handle(const fx::Keyboard& e);
+    void handle(const fx::Modifiers& e);
+    void handle(const fx::Scroll& e);
     void handle(const fx::Button& e);
     void handle(const fx::Send& e);
     void handle(const fx::Share& e);
@@ -296,7 +299,7 @@ private:
     std::vector<std::pair<srv::Client*, id_t>> feedbacks_;  // to re-send on change
     std::map<wm::WindowId, Key> windows_;
     struct Seat {
-        std::vector<id_t> keyboards;
+        std::vector<std::pair<id_t, std::uint32_t>> keyboards;  // id, version
         std::vector<std::pair<id_t, std::uint32_t>> pointers;  // id, version
         std::vector<id_t> data_devices;
     };
@@ -317,6 +320,14 @@ private:
     Surface* keyboard_focus_ = nullptr;
     Surface* pointer_focus_ = nullptr;
     wm::Mods mods_;
+    /// The typing head's exact xkb state; until a head sends one, masks
+    /// are derived from mods_ in the session's own keymap.
+    std::optional<link::up::Modifiers> xkb_mods_;
+    std::int32_t repeat_rate_ = 25, repeat_delay_ = 600;
+    /// Keys down right now, for wl_keyboard.enter's array.
+    std::vector<std::uint32_t> pressed_;
+    void send_modifiers(srv::Client& c, id_t keyboard);
+    void send_keymap(srv::Client& c, id_t keyboard, std::uint32_t version);
 
     srv::Display display_;  // last: destroyed first; its teardown reads the maps above
 };

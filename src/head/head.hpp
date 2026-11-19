@@ -63,12 +63,43 @@ struct GpuReady {
 /// The session went away.
 struct Lost {};
 
+// The seat itself, where the platform has a raw tap (Wayland): every key
+// press AND release by evdev code, the exact xkb state, and scroll as the
+// axis stream it is. Clients get these unchanged, so a held key is held,
+// modifiers are the real masks, and the layout is the one the user typed on.
+
+/// A key went down or up. `key` is mayag's reading of it (for bindings).
+struct KeyInput {
+    std::uint32_t code;
+    bool pressed;
+    mayag::KeyEvent key;
+};
+/// The platform's keymap (XKB text v1).
+struct KeymapInput {
+    std::string keymap;
+};
+/// The platform's key repeat.
+struct RepeatInput {
+    std::int32_t rate, delay;
+};
+/// The exact xkb modifier state.
+struct ModsInput {
+    link::up::Modifiers mods;
+};
+/// The head window lost the keyboard: nothing is held any more.
+struct KeyboardLeft {};
+/// One pointer frame of scrolling.
+struct ScrollInput {
+    link::up::Scroll scroll;
+};
+
 /// Everything the head's program hears: mayag's window, then the link.
 using Events = std::variant<mayag::KeyEvent, mayag::TextEvent, mayag::ComposeEvent, mayag::ComposeEndEvent,
                             mayag::MouseMove, mayag::MouseDown, mayag::MouseUp, mayag::ScrollEvent,
                             mayag::ResizeEvent, mayag::FocusEvent, mayag::CloseRequest, mayag::Clicked,
                             mayag::Activated, mayag::Pressed, mayag::Released, mayag::Entered, mayag::Left,
-                            mayag::Dragged, mayag::Scrolled, Heard, GpuDone, GpuReady, Lost>;
+                            mayag::Dragged, mayag::Scrolled, Heard, GpuDone, GpuReady, Lost, KeyInput, KeymapInput,
+                            RepeatInput, ModsInput, KeyboardLeft, ScrollInput>;
 
 // -- what the program asks the host for -------------------------------------------
 
@@ -121,6 +152,16 @@ struct Head {
         std::string swallow;
         /// A notice from the session, shown until a timer clears it.
         std::string notice;
+
+        /// The platform gives real key-up and xkb state (Wayland's raw tap):
+        /// clients get the seat as it is. Without it, a key to a client is a
+        /// press and an immediate release.
+        bool raw_keyboard = false;
+        /// This head's keymap and repeat rate, as clients should get them.
+        link::up::Keyboard keyboard;
+        /// Keys sent to clients as pressed and not yet released; and keys a
+        /// binding took, whose release must not reach a client either.
+        std::set<std::uint32_t> held, taken;
     };
 
     struct Tick {
@@ -129,7 +170,8 @@ struct Head {
     struct ClearNotice {};
     using Msg = std::variant<Heard, GpuDone, GpuReady, Lost, mayag::KeyEvent, mayag::TextEvent, mayag::Clicked, mayag::MouseMove,
                              mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, ClearNotice,
-                             mayag::CloseRequest>;
+                             mayag::CloseRequest, KeyInput, KeymapInput, RepeatInput, ModsInput, KeyboardLeft,
+                             ScrollInput, mayag::ScrollEvent>;
     using Cmd = mayag::Cmd<Msg, do_say, do_forget, mayag::upload_image, mayag::release_image, mayag::set_title>;
     using Sub = mayag::Sub<Msg>;
 
@@ -138,6 +180,13 @@ struct Head {
     static Cmd update(Model& m, GpuDone d);
     static Cmd update(Model& m, GpuReady g);
     static Cmd update(Model& m, Lost);
+    static Cmd update(Model& m, KeyInput k);
+    static Cmd update(Model& m, KeymapInput k);
+    static Cmd update(Model& m, RepeatInput r);
+    static Cmd update(Model& m, ModsInput k);
+    static Cmd update(Model& m, KeyboardLeft);
+    static Cmd update(Model& m, ScrollInput s);
+    static Cmd update(Model& m, mayag::ScrollEvent s);
     static Cmd update(Model& m, mayag::KeyEvent k);
     static Cmd update(Model& m, mayag::TextEvent t);
     static Cmd update(Model& m, mayag::Clicked c);

@@ -52,6 +52,9 @@ Server::Reply Server::receive(const Up& u) {
         [&](const up::Key& k) -> Reply { return {.input = Input{k}}; },
         [&](const up::Motion& m) -> Reply { return {.input = Input{m}}; },
         [&](const up::Button& b) -> Reply { return {.input = Input{b}}; },
+        [&](const up::Keyboard& k) -> Reply { return {.input = Input{k}}; },
+        [&](const up::Modifiers& k) -> Reply { return {.input = Input{k}}; },
+        [&](const up::Scroll& s) -> Reply { return {.input = Input{s}}; },
         [&](const up::Shown& s) -> Reply { return {.shown = s}; },
         [&](const up::Released& r) -> Reply { return {.released = r}; },
         [&](const up::Caps& c) -> Reply { return {.caps = c}; });

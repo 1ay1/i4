@@ -379,15 +379,20 @@ void Host::bind_seat(srv::Client& client, std::uint32_t version, id_t id) {
 
     l->on<wl_seat::requests::get_keyboard>([this, &client, v](srv::NewObject<wl_keyboard> k) {
         auto kl = std::make_shared<srv::RequestListener<wl_keyboard>>();
-        kl->on<wl_keyboard::requests::release>([this, &client, kid = k.id()] { std::erase(seats_[&client].keyboards, kid); });
+        kl->on<wl_keyboard::requests::release>([this, &client, kid = k.id()] {
+            std::erase_if(seats_[&client].keyboards, [&](const auto& e) { return e.first == kid; });
+        });
         auto kb = k.bind<seat_version>(kl);
-        seats_[&client].keyboards.push_back(k.id());
+        seats_[&client].keyboards.emplace_back(k.id(), v);
         // The keymap first: a key before its layout means nothing.
-        if (keymap_) kb.send<wl_keyboard::events::keymap>(wl_keyboard::keymap_format::xkb_v1, keymap_->fd(), keymap_->size());
-        if (v >= 4) kb.send<wl_keyboard::events::repeat_info>(25, 600);
-        if (keyboard_focus_ && keyboard_focus_->client == &client)
-            kb.send<wl_keyboard::events::enter>(display_.next_serial(), nonnull<wl_surface>(keyboard_focus_->id),
-                                                std::span<const std::byte>{});
+        send_keymap(client, k.id(), v);
+        if (keyboard_focus_ && keyboard_focus_->client == &client) {
+            kb.send<wl_keyboard::events::enter>(
+                display_.next_serial(), nonnull<wl_surface>(keyboard_focus_->id),
+                std::span<const std::byte>{reinterpret_cast<const std::byte*>(pressed_.data()),
+                                           pressed_.size() * sizeof(std::uint32_t)});
+            send_modifiers(client, k.id());
+        }
     });
     l->on<wl_seat::requests::get_pointer>([this, &client, v](srv::NewObject<wl_pointer> p) {
         auto pl = std::make_shared<srv::RequestListener<wl_pointer>>();
@@ -482,15 +487,20 @@ void Host::handle(const fx::KeyboardFocus& e) {
     Surface* to = e.window ? surface(*e.window) : nullptr;
     if (to == keyboard_focus_) return;
     if (keyboard_focus_)
-        for (auto k : seats_[keyboard_focus_->client].keyboards)
+        for (auto [k, v] : seats_[keyboard_focus_->client].keyboards)
             srv::Resource<wl_keyboard, seat_version>{keyboard_focus_->client, k}.send<wl_keyboard::events::leave>(
                 display_.next_serial(), nonnull<wl_surface>(keyboard_focus_->id));
     keyboard_focus_ = to;
     if (to) {
-        for (auto k : seats_[to->client].keyboards) {
+        // Keys already held enter with the focus (wl_keyboard.enter's
+        // array), so a client never sees the release of a key it never saw
+        // go down, nor misses that one is down.
+        const std::span<const std::byte> held{reinterpret_cast<const std::byte*>(pressed_.data()),
+                                              pressed_.size() * sizeof(std::uint32_t)};
+        for (auto [k, v] : seats_[to->client].keyboards) {
             srv::Resource<wl_keyboard, seat_version> kb{to->client, k};
-            kb.send<wl_keyboard::events::enter>(display_.next_serial(), nonnull<wl_surface>(to->id), std::span<const std::byte>{});
-            if (keymap_) kb.send<wl_keyboard::events::modifiers>(display_.next_serial(), keymap_->mask(mods_), 0, 0, 0);
+            kb.send<wl_keyboard::events::enter>(display_.next_serial(), nonnull<wl_surface>(to->id), held);
+            send_modifiers(*to->client, k);
         }
         // The protocol's rule: a client sees the clipboard when it gains
         // keyboard focus, just before its first key.
@@ -498,16 +508,88 @@ void Host::handle(const fx::KeyboardFocus& e) {
     }
 }
 
+void Host::send_modifiers(srv::Client& c, id_t keyboard) {
+    srv::Resource<wl_keyboard, seat_version> kb{&c, keyboard};
+    if (xkb_mods_)
+        kb.send<wl_keyboard::events::modifiers>(display_.next_serial(), xkb_mods_->depressed, xkb_mods_->latched,
+                                                xkb_mods_->locked, xkb_mods_->group);
+    else if (keymap_)
+        kb.send<wl_keyboard::events::modifiers>(display_.next_serial(), keymap_->mask(mods_), 0, 0, 0);
+}
+
+void Host::send_keymap(srv::Client& c, id_t keyboard, std::uint32_t version) {
+    srv::Resource<wl_keyboard, seat_version> kb{&c, keyboard};
+    if (keymap_) kb.send<wl_keyboard::events::keymap>(wl_keyboard::keymap_format::xkb_v1, keymap_->fd(), keymap_->size());
+    if (version >= 4) kb.send<wl_keyboard::events::repeat_info>(repeat_rate_, repeat_delay_);
+}
+
 void Host::handle(const fx::Key& e) {
-    const bool mods_changed = e.mods != mods_;
-    mods_ = e.mods;
+    // A head without exact xkb state: its coarse Mods become masks in the
+    // session's keymap, sent when they change.
+    const bool mods_changed = !xkb_mods_ && e.mods != mods_;
+    if (!xkb_mods_) mods_ = e.mods;
+    if (e.pressed) {
+        if (std::ranges::find(pressed_, e.code) != pressed_.end()) return;  // already down
+        pressed_.push_back(e.code);
+    } else if (std::erase(pressed_, e.code) == 0) {
+        return;  // was never down here
+    }
     if (!keyboard_focus_) return;
-    for (auto k : seats_[keyboard_focus_->client].keyboards) {
+    for (auto [k, v] : seats_[keyboard_focus_->client].keyboards) {
         srv::Resource<wl_keyboard, seat_version> kb{keyboard_focus_->client, k};
-        if (mods_changed && keymap_)
-            kb.send<wl_keyboard::events::modifiers>(display_.next_serial(), keymap_->mask(mods_), 0, 0, 0);
+        if (mods_changed) send_modifiers(*keyboard_focus_->client, k);
         kb.send<wl_keyboard::events::key>(display_.next_serial(), now_ms(), e.code,
                                           e.pressed ? wl_keyboard::key_state::pressed : wl_keyboard::key_state::released);
+    }
+}
+
+void Host::handle(const fx::Keyboard& e) {
+    auto k = Keymap::from_text(e.keyboard.keymap);
+    if (!k) {
+        std::fprintf(stderr, "i4d: %s; keeping the current keymap\n", k.error().c_str());
+        return;
+    }
+    keymap_.emplace(std::move(*k));
+    repeat_rate_ = e.keyboard.rate;
+    repeat_delay_ = e.keyboard.delay;
+    // Every keyboard learns the new layout at once; the focused one gets
+    // the modifier state again, which the protocol says follows a keymap.
+    for (auto& [c, seat] : seats_)
+        for (auto [kb, v] : seat.keyboards) {
+            send_keymap(*c, kb, v);
+            if (keyboard_focus_ && keyboard_focus_->client == c) send_modifiers(*c, kb);
+        }
+}
+
+void Host::handle(const fx::Modifiers& e) {
+    if (xkb_mods_ == e.mods) return;
+    xkb_mods_ = e.mods;
+    if (!keyboard_focus_) return;
+    for (auto [k, v] : seats_[keyboard_focus_->client].keyboards) send_modifiers(*keyboard_focus_->client, k);
+}
+
+void Host::handle(const fx::Scroll& e) {
+    if (!pointer_focus_) return;
+    const auto& s = e.scroll;
+    const auto t = now_ms();
+    for (auto [p, v] : seats_[pointer_focus_->client].pointers) {
+        srv::Resource<wl_pointer, seat_version> r{pointer_focus_->client, p};
+        // axis_source/axis_stop/axis_discrete are v5+, axis_value120 v8+;
+        // older pointers get the smooth values alone.
+        if (v >= 5 && s.source <= 3) r.send<wl_pointer::events::axis_source>(static_cast<wl_pointer::axis_source>(s.source));
+        auto axis = [&](wl_pointer::axis a, std::int32_t value, std::int32_t v120, bool stop) {
+            if (v120 != 0) {
+                if (v >= 8)
+                    r.send<wl_pointer::events::axis_value120>(a, v120);
+                else if (v >= 5 && v120 % 120 == 0)
+                    r.send<wl_pointer::events::axis_discrete>(a, v120 / 120);
+            }
+            if (value != 0) r.send<wl_pointer::events::axis>(t, a, fixed::from_raw(value));
+            if (stop && v >= 5) r.send<wl_pointer::events::axis_stop>(t, a);
+        };
+        axis(wl_pointer::axis::vertical_scroll, s.dy, s.dy120, s.stop_y);
+        axis(wl_pointer::axis::horizontal_scroll, s.dx, s.dx120, s.stop_x);
+        if (v >= 5) r.send<wl_pointer::events::frame>();
     }
 }
 

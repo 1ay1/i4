@@ -227,6 +227,35 @@ TEST(a_failed_launch_says_so) {
     CHECK(n && n->text == "nosuchapp failed (exit 127)");
 }
 
+TEST(a_head_that_leaves_with_a_key_down_lets_go_of_it) {
+    H h;
+    h.send(ev::OutputReady{output()});
+    h.send(ev::Mapped{wm::WindowId{1}, app("a")});
+    const auto head = attach(h);
+    h.send(ev::HeadSaid{head, link::up::Key{30, true, {}}});
+    h.record().clear();
+    h.send(ev::HeadLeft{head});
+    const auto keys = h.effects<do_key>();
+    CHECK(keys.size() == 1 && keys.at(0).code == 30 && !keys.at(0).pressed);
+}
+
+TEST(clients_get_the_keymap_of_the_head_that_types) {
+    H h;
+    h.send(ev::OutputReady{output()});
+    const auto one = attach(h, 1), two = attach(h, 2);
+    h.send(ev::HeadSaid{one, link::up::Keyboard{"us", 25, 600}});
+    h.send(ev::HeadSaid{two, link::up::Keyboard{"de", 30, 300}});
+    auto kb = all<do_keyboard>(h);
+    CHECK(kb.size() == 1 && kb.at(0).keyboard.keymap == "us");  // the first is the typist
+    h.send(ev::HeadSaid{two, link::up::Modifiers{1, 0, 0, 0}});
+    CHECK(h.effects<do_modifiers>().empty());  // not typing: not its state
+    h.send(ev::HeadSaid{two, link::up::Key{30, true, {}}});
+    kb = h.effects<do_keyboard>();
+    const auto mods = h.effects<do_modifiers>();
+    CHECK(kb.size() == 1 && kb.at(0).keyboard.keymap == "de");
+    CHECK(mods.size() == 1 && mods.at(0).mods.depressed == 1u);
+}
+
 TEST(when_the_last_head_leaves_no_client_waits_forever) {
     H h;
     h.send(ev::OutputReady{output()});

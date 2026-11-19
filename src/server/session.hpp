@@ -16,6 +16,7 @@
 
 #include <map>
 #include <optional>
+#include <set>
 #include <variant>
 
 #include "i4/link/predict.hpp"
@@ -38,6 +39,12 @@ struct Session {
         bool caps_known = false;
         /// Per window: the newest generation it has released.
         std::map<wm::WindowId, std::uint64_t> released;
+        /// Keys it has pressed and not released: let go of if it leaves,
+        /// so a dropped head never leaves a key stuck down in a client.
+        std::set<std::uint32_t> held;
+        /// Its keymap and repeat rate, once it has said.
+        std::optional<link::up::Keyboard> keyboard;
+        link::up::Modifiers mods{};
     };
 
     struct Model {
@@ -48,6 +55,8 @@ struct Session {
         std::optional<wm::WindowId> keyboard;
         std::optional<wm::WindowId> pointer;
         std::map<HeadId, Head> heads;
+        /// The head whose keyboard clients currently have (the last to type).
+        std::optional<HeadId> typist;
         std::vector<link::App> apps;
 
         /// Launches still running, and how many windows had been mapped
@@ -66,7 +75,8 @@ struct Session {
 
     using Msg = Event;
     using Cmd = jaal::Cmd<Msg, do_configure, do_close, do_keyboard_focus, do_pointer_at, do_key, do_button, do_send,
-                          do_share, do_frames_done, do_release, do_formats, do_drop, do_spawn>;
+                          do_share, do_frames_done, do_release, do_formats, do_drop, do_spawn, do_keyboard,
+                          do_modifiers, do_scroll>;
 
     /// Scan the .desktop files off the loop; they arrive as ev::AppsFound.
     static Cmd init(Model& m);

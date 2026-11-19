@@ -30,33 +30,61 @@ std::uint32_t bit(xkb_keymap* k, const char* name) {
 
 }  // namespace
 
-std::expected<Keymap, std::string> Keymap::compile(const std::string& layout) {
-    std::unique_ptr<xkb_context, ContextFree> ctx{xkb_context_new(XKB_CONTEXT_NO_FLAGS)};
-    if (!ctx) return std::unexpected("xkb: no context");
-    const xkb_rule_names names{nullptr, nullptr, layout.c_str(), nullptr, nullptr};
-    std::unique_ptr<xkb_keymap, KeymapFree> km{
-        xkb_keymap_new_from_names(ctx.get(), &names, XKB_KEYMAP_COMPILE_NO_FLAGS)};
-    if (!km) return std::unexpected("xkb: cannot compile layout '" + layout + "'");
-    std::unique_ptr<char, Free> text{xkb_keymap_get_as_string(km.get(), XKB_KEYMAP_FORMAT_TEXT_V1)};
-    if (!text) return std::unexpected("xkb: cannot serialise the keymap");
+namespace {
+
+std::unique_ptr<xkb_context, ContextFree> context() {
+    return std::unique_ptr<xkb_context, ContextFree>{xkb_context_new(XKB_CONTEXT_NO_FLAGS)};
+}
+
+}  // namespace
+
+std::expected<Keymap, std::string> Keymap::share(xkb_keymap* km, std::string_view verbatim) {
+    std::unique_ptr<char, Free> serialised;
+    if (verbatim.empty()) {
+        serialised.reset(xkb_keymap_get_as_string(km, XKB_KEYMAP_FORMAT_TEXT_V1));
+        if (!serialised) return std::unexpected("xkb: cannot serialise the keymap");
+        verbatim = serialised.get();
+    }
 
     // The NUL is part of what wl_keyboard.keymap promises.
-    const auto size = std::strlen(text.get()) + 1;
+    const auto size = verbatim.size() + 1;
     wl::OwnedFd fd{::memfd_create("i4-keymap", MFD_CLOEXEC | MFD_ALLOW_SEALING)};
     if (!fd) return std::unexpected("memfd_create failed");
     if (::ftruncate(fd.get(), static_cast<off_t>(size)) != 0 ||
-        ::pwrite(fd.get(), text.get(), size, 0) != static_cast<ssize_t>(size))
+        ::pwrite(fd.get(), verbatim.data(), verbatim.size(), 0) != static_cast<ssize_t>(verbatim.size()))
         return std::unexpected("cannot write the keymap");
     ::fcntl(fd.get(), F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
 
     Keymap k;
     k.fd_ = std::move(fd);
     k.size_ = static_cast<std::uint32_t>(size);
-    k.shift_ = bit(km.get(), XKB_MOD_NAME_SHIFT);
-    k.ctrl_ = bit(km.get(), XKB_MOD_NAME_CTRL);
-    k.alt_ = bit(km.get(), XKB_MOD_NAME_ALT);
-    k.super_ = bit(km.get(), XKB_MOD_NAME_LOGO);
+    k.shift_ = bit(km, XKB_MOD_NAME_SHIFT);
+    k.ctrl_ = bit(km, XKB_MOD_NAME_CTRL);
+    k.alt_ = bit(km, XKB_MOD_NAME_ALT);
+    k.super_ = bit(km, XKB_MOD_NAME_LOGO);
     return k;
+}
+
+std::expected<Keymap, std::string> Keymap::compile(const std::string& layout) {
+    auto ctx = context();
+    if (!ctx) return std::unexpected("xkb: no context");
+    const xkb_rule_names names{nullptr, nullptr, layout.c_str(), nullptr, nullptr};
+    std::unique_ptr<xkb_keymap, KeymapFree> km{
+        xkb_keymap_new_from_names(ctx.get(), &names, XKB_KEYMAP_COMPILE_NO_FLAGS)};
+    if (!km) return std::unexpected("xkb: cannot compile layout '" + layout + "'");
+    return share(km.get(), {});
+}
+
+std::expected<Keymap, std::string> Keymap::from_text(const std::string& text) {
+    auto ctx = context();
+    if (!ctx) return std::unexpected("xkb: no context");
+    std::unique_ptr<xkb_keymap, KeymapFree> km{xkb_keymap_new_from_buffer(
+        ctx.get(), text.data(), text.size(), XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS)};
+    if (!km) return std::unexpected("xkb: a head sent a keymap that does not compile");
+    // Passed through as sent (once xkbcommon has read it): the head's
+    // modifier masks index THIS text's modifiers, and a re-serialised map
+    // need not number them the same way.
+    return share(km.get(), text);
 }
 
 std::uint32_t Keymap::mask(wm::Mods m) const {

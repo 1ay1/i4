@@ -82,6 +82,12 @@ struct PointerAt { std::optional<wm::WindowId> window; Point<space::Surface> at;
 /// Input for whoever has keyboard / pointer focus.
 struct Key { std::uint32_t code; bool pressed; wm::Mods mods; };
 struct Button { std::uint32_t button; bool pressed; };
+/// The keymap and repeat rate clients should use (the typing head's own).
+struct Keyboard { link::up::Keyboard keyboard; };
+/// Exact xkb modifier masks in that keymap.
+struct Modifiers { link::up::Modifiers mods; };
+/// One pointer frame of scrolling for whoever has the pointer.
+struct Scroll { link::up::Scroll scroll; };
 /// A link message to these heads.
 struct Send { std::vector<HeadId> to; link::Down message; };
 /// A window's current pixels to these heads (the host owns the buffer).
@@ -108,6 +114,9 @@ using do_keyboard_focus = jaal::pure_fx<fx::KeyboardFocus, "i4d.keyboard_focus">
 using do_pointer_at = jaal::pure_fx<fx::PointerAt, "i4d.pointer_at">;
 using do_key = jaal::pure_fx<fx::Key, "i4d.key">;
 using do_button = jaal::pure_fx<fx::Button, "i4d.button">;
+using do_keyboard = jaal::pure_fx<fx::Keyboard, "i4d.keyboard">;
+using do_modifiers = jaal::pure_fx<fx::Modifiers, "i4d.modifiers">;
+using do_scroll = jaal::pure_fx<fx::Scroll, "i4d.scroll">;
 using do_send = jaal::pure_fx<fx::Send, "i4d.send">;
 using do_share = jaal::pure_fx<fx::Share, "i4d.share">;
 using do_frames_done = jaal::pure_fx<fx::FramesDone, "i4d.frames_done">;

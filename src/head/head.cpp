@@ -141,12 +141,12 @@ Cmd Head::update(Model& m, Lost) {
     return Cmd::quit(0);
 }
 
-Cmd Head::update(Model& m, mayag::KeyEvent k) {
-    if (false)
-        std::fprintf(stderr, "i4-head: key %d mods s%d c%d a%d m%d ready=%d launcher=%d apps=%zu\n",
-                     static_cast<int>(k.key), k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.super,
-                     m.replica.ready(), m.launcher.open, m.apps.size());
-    if (!m.replica.ready()) return {};
+namespace {
+
+/// What the head itself does with a key press: a binding, the launcher.
+/// Sets `took` when the key is the head's, so it never reaches a client.
+Cmd command(Head::Model& m, const mayag::KeyEvent& k, bool& took) {
+    took = true;
     const auto c = chord(k);
     m.swallow.clear();
 
@@ -181,10 +181,92 @@ Cmd Head::update(Model& m, mayag::KeyEvent k) {
             return say(std::move(req));
         }
     }
+    took = false;
+    return {};
+}
+
+}  // namespace
+
+Cmd Head::update(Model& m, mayag::KeyEvent k) {
+    if (!m.replica.ready()) return {};
+    if (m.raw_keyboard) {
+        // Presses came through KeyInput already. Only the launcher uses
+        // mayag's repeat (holding Down scrolls the list); clients repeat
+        // keys themselves from wl_keyboard.repeat_info.
+        if (!k.repeat || !m.launcher.open) return {};
+        using K = mayag::Key;
+        if (k.key != K::up && k.key != K::down && k.key != K::tab && k.key != K::backspace) return {};
+        bool took = false;
+        return command(m, k, took);
+    }
+    bool took = false;
+    auto cmd = command(m, k, took);
+    if (took) return cmd;
     const auto code = evdev(k.key);
     if (!code) return {};
     const auto mods = head::mods(k.mods);
     return Cmd::batch(say(link::up::Key{*code, true, mods}), say(link::up::Key{*code, false, mods}));
+}
+
+Cmd Head::update(Model& m, KeyInput k) {
+    m.raw_keyboard = true;
+    if (!m.replica.ready()) return {};
+    if (!k.pressed) {
+        // A release goes where its press went.
+        if (m.taken.erase(k.code) != 0) return {};
+        if (m.held.erase(k.code) == 0) return {};
+        return say(link::up::Key{k.code, false, head::mods(k.key.mods)});
+    }
+    if (m.held.contains(k.code) || m.taken.contains(k.code)) return {};  // a platform repeat: clients repeat
+    bool took = false;
+    auto cmd = command(m, k.key, took);
+    if (took) {
+        m.taken.insert(k.code);
+        return cmd;
+    }
+    m.held.insert(k.code);
+    return say(link::up::Key{k.code, true, head::mods(k.key.mods)});
+}
+
+Cmd Head::update(Model& m, KeymapInput k) {
+    m.raw_keyboard = true;
+    m.keyboard.keymap = std::move(k.keymap);
+    return say(m.keyboard);
+}
+
+Cmd Head::update(Model& m, RepeatInput r) {
+    m.keyboard.rate = r.rate;
+    m.keyboard.delay = r.delay;
+    if (m.keyboard.keymap.empty()) return {};
+    return say(m.keyboard);
+}
+
+Cmd Head::update(Model&, ModsInput k) { return say(k.mods); }
+
+Cmd Head::update(Model& m, KeyboardLeft) {
+    // The head window lost the keyboard (the user alt-tabbed away on the
+    // machine it runs on): whatever was down is up, for clients too.
+    std::vector<Cmd> out;
+    for (auto code : m.held) out.push_back(say(link::up::Key{code, false, {}}));
+    m.held.clear();
+    m.taken.clear();
+    out.push_back(say(link::up::Modifiers{0, 0, 0, 0}));
+    return batch(std::move(out));
+}
+
+Cmd Head::update(Model& m, ScrollInput s) {
+    if (!m.replica.ready() || m.launcher.open) return {};
+    return say(s.scroll);
+}
+
+Cmd Head::update(Model& m, mayag::ScrollEvent s) {
+    // Platforms without the raw tap: mayag's coalesced pixels, sent as
+    // smooth scrolling (wl_fixed; wl_pointer's positive is down/right).
+    if (m.raw_keyboard || !m.replica.ready() || m.launcher.open) return {};
+    link::up::Scroll out;
+    out.dx = static_cast<std::int32_t>(-s.delta.x * 256.0f);
+    out.dy = static_cast<std::int32_t>(-s.delta.y * 256.0f);
+    return say(out);
 }
 
 Cmd Head::update(Model& m, mayag::TextEvent t) {

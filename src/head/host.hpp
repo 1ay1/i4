@@ -38,7 +38,7 @@ public:
     using Window = mayag::window_host<P, W>;
 
     Host(W& window, mayag::AppConfig cfg, transport::Channel link)
-        : window_(window, std::move(cfg)), link_(std::move(link)) {}
+        : window_(window, std::move(cfg)), link_(std::move(link)), native_(window) {}
 
     // -- the window's half, forwarded; the link's half, added ---------------
 
@@ -50,6 +50,7 @@ public:
         stop_ = [&cx](int code) { cx.stop(code); };
         watch_ = [&cx](int fd, jaal::interest what, std::uint64_t token) { return cx.watch(fd, what, token); };
         emit_ = [&cx](Events e) { (void)cx.emit(e); };
+        tap();
         window_.attach(narrow_);
         if (auto r = cx.watch(link_.fd(), jaal::interest::read, kLink)) reg_.emplace(std::move(*r));
     }
@@ -153,7 +154,7 @@ public:
     }
     void handle(const Forget& f) { forget(f.window); }
     void handle(const Say& s) {
-        if (trace_ && std::holds_alternative<link::up::Key>(s.message) && !last_key_)
+        if (trace_ && !last_key_ && std::holds_alternative<link::up::Key>(s.message))
             last_key_ = std::chrono::steady_clock::now();
         (void)link_.send(link::encode(s.message));
     }
@@ -170,6 +171,49 @@ public:
 
 private:
     static constexpr std::uint64_t kLink = 1u << 20;
+
+    /// The platform's raw seat (Wayland): real key-up, xkb state, the axis
+    /// stream. Wired only where the platform has it; elsewhere the program
+    /// falls back to mayag's events.
+    void tap() {
+        if constexpr (requires { native_.set_raw_input([](const mayag::platform::RawInput&) {}); }) {
+            native_.set_raw_input([this](const mayag::platform::RawInput& in) {
+                namespace r = mayag::platform::raw;
+                if (!emit_) return;
+                std::visit(
+                    [&]<class T>(const T& e) {
+                        if constexpr (std::is_same_v<T, r::Key>) {
+                            if (e.pressed && trace_) last_key_ = std::chrono::steady_clock::now();
+                            emit_(KeyInput{e.code, e.pressed, mayag::KeyEvent{e.key, e.mods, false}});
+                        } else if constexpr (std::is_same_v<T, r::Keymap>) {
+                            emit_(KeymapInput{e.text});
+                        } else if constexpr (std::is_same_v<T, r::Repeat>) {
+                            emit_(RepeatInput{e.rate, e.delay});
+                        } else if constexpr (std::is_same_v<T, r::Modifiers>) {
+                            emit_(ModsInput{{e.depressed, e.latched, e.locked, e.group}});
+                        } else if constexpr (std::is_same_v<T, r::KeyboardFocus>) {
+                            if (!e.in) emit_(KeyboardLeft{});
+                        } else if constexpr (std::is_same_v<T, r::Axis>) {
+                            (e.axis == 0 ? scroll_.dy : scroll_.dx) += e.value;
+                            scrolled_ = true;
+                        } else if constexpr (std::is_same_v<T, r::AxisValue120>) {
+                            (e.axis == 0 ? scroll_.dy120 : scroll_.dx120) += e.value120;
+                            scrolled_ = true;
+                        } else if constexpr (std::is_same_v<T, r::AxisSource>) {
+                            scroll_.source = e.source;
+                        } else if constexpr (std::is_same_v<T, r::AxisStop>) {
+                            (e.axis == 0 ? scroll_.stop_y : scroll_.stop_x) = true;
+                            scrolled_ = true;
+                        } else if constexpr (std::is_same_v<T, r::Frame>) {
+                            if (scrolled_) emit_(ScrollInput{scroll_});
+                            scroll_ = {};
+                            scrolled_ = false;
+                        }
+                    },
+                    in);
+            });
+        }
+    }
 
     /// What the window sees as its context: its own event type, routed into
     /// ours. A member, because the window keeps a reference to its context
@@ -308,6 +352,9 @@ private:
     std::function<jaal::result<jaal::platform::native_reactor::registration>(int, jaal::interest, std::uint64_t)> watch_;
     std::function<void(Events)> emit_;
     Narrow narrow_{this};
+    W& native_;
+    link::up::Scroll scroll_;  // the pointer frame being gathered
+    bool scrolled_ = false;
     bool trace_ = std::getenv("I4_HEAD_TRACE") != nullptr;
     std::optional<std::chrono::steady_clock::time_point> last_key_;
     struct Imported {

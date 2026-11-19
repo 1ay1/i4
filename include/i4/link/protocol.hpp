@@ -69,16 +69,48 @@ struct Request {
 /// A key the head's bindings did not take: it goes to the focused window.
 /// `code` is an evdev keycode, i4's one keyboard vocabulary on every head
 /// platform (each head maps its OS's keys into it).
+///
+/// Presses and releases are separate, real events: a held key stays held
+/// in the client until the head lets go of it. `mods` is the coarse state,
+/// used only when the head has not sent its own Keyboard (then the
+/// session's keymap derives the masks from it).
 struct Key {
     std::uint32_t code;
     bool pressed;
     wm::Mods mods;
     friend bool operator==(const Key&, const Key&) = default;
 };
+/// The head's keyboard: its XKB keymap (text v1) and repeat rate. With it,
+/// clients get exactly the layout the user typed on, and Modifiers below
+/// are masks into this keymap, forwarded unchanged. Sent when it changes.
+struct Keyboard {
+    std::string keymap;
+    std::int32_t rate = 25;    // keys per second; 0 = no repeat
+    std::int32_t delay = 600;  // ms
+    friend bool operator==(const Keyboard&, const Keyboard&) = default;
+};
+/// The exact xkb modifier state (depressed, latched, locked masks and the
+/// layout group), in the head's Keyboard keymap.
+struct Modifiers {
+    std::uint32_t depressed, latched, locked, group;
+    friend bool operator==(const Modifiers&, const Modifiers&) = default;
+};
 /// The pointer is here, in desktop pixels.
 struct Motion {
     Point<space::Desktop> at;
     friend bool operator==(const Motion&, const Motion&) = default;
+};
+/// One pointer frame of scrolling, as the wl_pointer axis stream has it:
+/// smooth deltas (wl_fixed, 24.8), high-resolution wheel steps (120 per
+/// detent; 0 when the source is not a wheel), and "stopped" for kinetic
+/// scrolling. `source` is wl_pointer.axis_source (0 wheel, 1 finger,
+/// 2 continuous, 3 wheel tilt).
+struct Scroll {
+    std::uint32_t source = 0;
+    std::int32_t dx = 0, dy = 0;
+    std::int32_t dx120 = 0, dy120 = 0;
+    bool stop_x = false, stop_y = false;
+    friend bool operator==(const Scroll&, const Scroll&) = default;
 };
 /// An evdev button code (BTN_LEFT = 0x110).
 struct Button {
@@ -120,8 +152,9 @@ struct Caps {
 };
 }  // namespace up
 
-using Input = std::variant<up::Key, up::Motion, up::Button>;
-using Up = std::variant<up::Hello, up::Request, up::Key, up::Motion, up::Button, up::Shown, up::Released, up::Caps>;
+using Input = std::variant<up::Key, up::Keyboard, up::Modifiers, up::Motion, up::Button, up::Scroll>;
+using Up = std::variant<up::Hello, up::Request, up::Key, up::Motion, up::Button, up::Shown, up::Released, up::Caps,
+                        up::Keyboard, up::Modifiers, up::Scroll>;
 
 // -- server -> head ------------------------------------------------------------
 

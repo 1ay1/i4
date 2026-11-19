@@ -192,8 +192,11 @@ Cmd Session::update(Model& m, ev::HeadJoined e) {
 }
 
 Cmd Session::update(Model& m, ev::HeadLeft e) {
-    m.heads.erase(e.head);
     std::vector<Cmd> out;
+    if (auto it = m.heads.find(e.head); it != m.heads.end())
+        for (auto code : it->second.held) out.push_back(fx::Key{code, false, {}});
+    if (m.typist == e.head) m.typist.reset();
+    m.heads.erase(e.head);
     if (welcomed(m).empty()) {
         // The last head is gone: nothing will show or read a frame again, so
         // every client is released from waiting and from its buffers.
@@ -238,7 +241,32 @@ Cmd Session::update(Model& m, ev::HeadSaid e) {
     }
     if (reply.input)
         match(
-            *reply.input, [&](const link::up::Key& k) { out.push_back(fx::Key{k.code, k.pressed, k.mods}); },
+            *reply.input,
+            [&](const link::up::Key& k) {
+                auto& h = m.heads[e.head];
+                if (k.pressed) h.held.insert(k.code); else h.held.erase(k.code);
+                // Another head's keyboard starts typing: clients switch to
+                // its layout and modifier state before its first key.
+                if (m.typist != e.head && h.keyboard) {
+                    m.typist = e.head;
+                    out.push_back(fx::Keyboard{*h.keyboard});
+                    out.push_back(fx::Modifiers{h.mods});
+                }
+                out.push_back(fx::Key{k.code, k.pressed, k.mods});
+            },
+            [&](const link::up::Keyboard& k) {
+                auto& h = m.heads[e.head];
+                h.keyboard = k;
+                if (!m.typist || m.typist == e.head) {
+                    m.typist = e.head;
+                    out.push_back(fx::Keyboard{k});
+                }
+            },
+            [&](const link::up::Modifiers& k) {
+                m.heads[e.head].mods = k;
+                if (m.typist == e.head) out.push_back(fx::Modifiers{k});
+            },
+            [&](const link::up::Scroll& s) { out.push_back(fx::Scroll{s}); },
             [&](const link::up::Motion& mo) {
                 const auto p = hit(m.arranged, mo.at);
                 m.pointer = p.window;
