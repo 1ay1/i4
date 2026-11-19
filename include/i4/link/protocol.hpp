@@ -242,10 +242,45 @@ struct Notice {
     std::string text;
     friend bool operator==(const Notice&, const Notice&) = default;
 };
+
+// The pointer's look, as the client under it asked. The head shows it on
+// its own platform cursor (a hardware plane where there is one), so the
+// pointer moves at the speed of the machine the head runs on and never
+// waits on the link.
+
+/// A named shape: wp_cursor_shape_device_v1.shape, the protocol's enum
+/// value (1 = default ... 34 = zoom-out). The head's platform draws it
+/// from the user's own theme.
+struct CursorShape {
+    std::uint32_t shape = 1;
+    friend bool operator==(const CursorShape&, const CursorShape&) = default;
+};
+/// An image the client drew (wl_pointer.set_cursor): ARGB8888, premultiplied,
+/// tightly packed (stride = 4 * width), hotspot in its pixels.
+struct CursorImage {
+    std::int32_t width = 0, height = 0;
+    std::int32_t hot_x = 0, hot_y = 0;
+    std::string argb;
+    /// Decoding refuses anything else: a head never sizes a cursor from a
+    /// length it did not check.
+    [[nodiscard]] bool valid() const {
+        return width > 0 && height > 0 && width <= 512 && height <= 512 &&
+               argb.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+    }
+    friend bool operator==(const CursorImage&, const CursorImage&) = default;
+};
+/// No cursor (a game, a video playing).
+struct CursorHidden {
+    friend bool operator==(const CursorHidden&, const CursorHidden&) = default;
+};
+struct Cursor {
+    std::variant<CursorShape, CursorImage, CursorHidden> look;
+    friend bool operator==(const Cursor&, const Cursor&) = default;
+};
 }  // namespace down
 
 using Down = std::variant<down::Welcome, down::Refused, down::Applied, down::Content, down::Apps, down::Notice,
-                          down::Timeline>;
+                          down::Timeline, down::Cursor>;
 
 // -- the protocol's identity --------------------------------------------------------
 //

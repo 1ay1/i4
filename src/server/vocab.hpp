@@ -60,10 +60,14 @@ struct AppsFound { std::vector<link::App> apps; };
 struct Launched { LaunchId launch; std::string command; bool started; };
 /// A launched process ended, and was reaped.
 struct Exited { LaunchId launch; bool signalled; std::int32_t code; };
+/// The client under the pointer changed how the pointer looks (or the
+/// pointer moved to another client / to nothing: the default arrow).
+struct CursorChanged { link::down::Cursor cursor; };
 }  // namespace ev
 
 using Event = std::variant<ev::OutputReady, ev::Mapped, ev::Retitled, ev::Unmapped, ev::Committed,
-                           ev::HeadJoined, ev::HeadSaid, ev::HeadLeft, ev::AppsFound, ev::Launched, ev::Exited>;
+                           ev::HeadJoined, ev::HeadSaid, ev::HeadLeft, ev::AppsFound, ev::Launched, ev::Exited,
+                           ev::CursorChanged>;
 
 // -- effects: program -> host ---------------------------------------------------
 //

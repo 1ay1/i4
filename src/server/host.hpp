@@ -144,6 +144,11 @@ struct Surface {
     /// once a frame at or after that generation has been shown and it is no
     /// longer the current buffer.
     std::map<id_t, std::uint64_t> held;
+    /// wl_pointer.set_cursor gave it the cursor role, with this hotspot
+    /// (moved by wl_surface.offset, as the protocol says).
+    bool cursor = false;
+    std::int32_t hot_x = 0, hot_y = 0;
+    std::int32_t offset_x = 0, offset_y = 0;  // pending wl_surface.offset
 };
 
 // -- the host ----------------------------------------------------------------------
@@ -233,6 +238,12 @@ private:
     void bind_dmabuf(srv::Client& c, std::uint32_t version, id_t id);
     void bind_data_device_manager(srv::Client& c, std::uint32_t version, id_t id);
     void bind_syncobj(srv::Client& c, std::uint32_t version, id_t id);
+    void bind_cursor_shape(srv::Client& c, std::uint32_t version, id_t id);
+    /// The pointer's look, to the session (which dedups and tells heads).
+    void publish_cursor(link::down::Cursor c);
+    /// A cursor surface committed: copy its (small) image out and give the
+    /// buffer straight back, so a client's cursor never waits on a head.
+    void cursor_committed(Surface& s);
     /// Offer the current selection to `c` (its data devices), or none.
     void offer_selection(srv::Client& c);
     void set_selection(std::optional<Key> source);
@@ -319,6 +330,8 @@ private:
     std::map<Key, Key> offers_;  // offer -> the source it reads
     Surface* keyboard_focus_ = nullptr;
     Surface* pointer_focus_ = nullptr;
+    /// The surface the pointer-focused client set as its cursor, if any.
+    Surface* cursor_surface_ = nullptr;
     wm::Mods mods_;
     /// The typing head's exact xkb state; until a head sends one, masks
     /// are derived from mods_ in the session's own keymap.

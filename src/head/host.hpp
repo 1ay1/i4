@@ -153,6 +153,21 @@ public:
         return window_.handle(e);
     }
     void handle(const Forget& f) { forget(f.window); }
+    void handle(const ShowCursor& c) {
+        if constexpr (requires { native_.set_cursor_shape_raw(1u); }) {
+            std::visit(
+                [&]<class T>(const T& look) {
+                    if constexpr (std::is_same_v<T, link::down::CursorShape>)
+                        native_.set_cursor_shape_raw(look.shape);
+                    else if constexpr (std::is_same_v<T, link::down::CursorImage>)
+                        native_.set_cursor_image(reinterpret_cast<const std::uint8_t*>(look.argb.data()), look.width,
+                                                 look.height, look.width * 4, look.hot_x, look.hot_y);
+                    else
+                        native_.hide_cursor();
+                },
+                c.cursor.look);
+        }
+    }
     void handle(const Say& s) {
         if (trace_ && !last_key_ && std::holds_alternative<link::up::Key>(s.message))
             last_key_ = std::chrono::steady_clock::now();

@@ -71,6 +71,8 @@ struct Session {
         /// What clients were last offered (so a change is announced once).
         std::vector<link::up::Format> offered;
         bool offered_sync = false;
+        /// How the pointer looks now; every head shows it, new ones at once.
+        link::down::Cursor cursor;
     };
 
     using Msg = Event;
@@ -92,6 +94,7 @@ struct Session {
     static Cmd update(Model& m, ev::AppsFound e);
     static Cmd update(Model& m, ev::Launched e);
     static Cmd update(Model& m, ev::Exited e);
+    static Cmd update(Model& m, ev::CursorChanged e);
 
     // The host's events are the program's messages, one for one.
     template <class E>

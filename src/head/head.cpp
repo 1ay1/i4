@@ -93,6 +93,7 @@ Cmd Head::update(Model& m, Heard h) {
         return batch(std::move(out));
     }
 
+    if (auto* cur = std::get_if<link::down::Cursor>(&h.message)) return ShowCursor{std::move(*cur)};
     if (const auto* a = std::get_if<link::down::Apps>(&h.message)) {
         m.apps = a->apps;
         if (m.launcher.open) m.launcher.refilter(m.apps);

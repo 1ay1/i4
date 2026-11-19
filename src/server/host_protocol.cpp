@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <i4/wl/proto/linux_dmabuf_v1.hpp>
+#include <i4/wl/proto/cursor_shape_v1.hpp>
 
 #include "host.hpp"
 #include "i4/base/match.hpp"
@@ -120,11 +121,13 @@ void Host::publish_globals() {
     global(std::type_identity<wl_subcompositor>{}, 1, &Host::bind_subcompositor);
     global(std::type_identity<zxdg_decoration_manager_v1>{}, 1, &Host::bind_decoration);
     global(std::type_identity<wl_data_device_manager>{}, 3, &Host::bind_data_device_manager);
+    global(std::type_identity<wp_cursor_shape_manager_v1>{}, 2, &Host::bind_cursor_shape);
 }
 
 void Host::destroyed(Surface& s) {
     if (keyboard_focus_ == &s) keyboard_focus_ = nullptr;
     if (pointer_focus_ == &s) pointer_focus_ = nullptr;
+    if (cursor_surface_ == &s) cursor_surface_ = nullptr;
     if (s.toplevel)
         if (const auto* m = std::get_if<life::Mapped>(&s.toplevel->life)) {
             windows_.erase(m->window);
@@ -190,7 +193,12 @@ void Host::bind_compositor(srv::Client& client, std::uint32_t version, id_t id) 
         sl->on<wl_surface::requests::set_input_region>([](Ref<wl_region>) {});
         sl->on<wl_surface::requests::set_buffer_scale>([](std::int32_t) {});
         sl->on<wl_surface::requests::set_buffer_transform>([](wl_output_transform) {});
-        sl->on<wl_surface::requests::offset>([](std::int32_t, std::int32_t) {});
+        sl->on<wl_surface::requests::offset>([this, &client, sid](std::int32_t dx, std::int32_t dy) {
+            if (auto* x = surface(&client, sid)) {
+                x->offset_x = dx;
+                x->offset_y = dy;
+            }
+        });
         s.bind<compositor_version>(sl);
     });
 
@@ -225,6 +233,7 @@ void Host::committed(Surface& s) {
     if (!s.toplevel) {
         // Not a window (subsurface, popup, cursor): nothing shows it yet, so
         // its frames are answered now and the client keeps going.
+        if (s.cursor) cursor_committed(s);
         answer_frames(*s.client, frames, now_ms());
         return;
     }
@@ -396,7 +405,24 @@ void Host::bind_seat(srv::Client& client, std::uint32_t version, id_t id) {
     });
     l->on<wl_seat::requests::get_pointer>([this, &client, v](srv::NewObject<wl_pointer> p) {
         auto pl = std::make_shared<srv::RequestListener<wl_pointer>>();
-        pl->on<wl_pointer::requests::set_cursor>([](std::uint32_t, Ref<wl_surface>, std::int32_t, std::int32_t) {});
+        pl->on<wl_pointer::requests::set_cursor>(
+            [this, &client](std::uint32_t, Ref<wl_surface> ws, std::int32_t hx, std::int32_t hy) {
+                // Only the client the pointer is over decides how it looks.
+                if (!pointer_focus_ || pointer_focus_->client != &client) return;
+                if (!ws) {
+                    cursor_surface_ = nullptr;
+                    publish_cursor({link::down::CursorHidden{}});
+                    return;
+                }
+                auto* s = surface(&client, ws.id);
+                if (!s || s->toplevel) return;  // a window cannot also be a cursor
+                s->cursor = true;
+                s->hot_x = hx;
+                s->hot_y = hy;
+                cursor_surface_ = s;
+                // Usually the surface was committed before this call: show it now.
+                if (s->current.buffer) cursor_committed(*s);
+            });
         pl->on<wl_pointer::requests::release>([this, &client, pid = p.id()] {
             std::erase_if(seats_[&client].pointers, [&](const auto& e) { return e.first == pid; });
         });
@@ -609,6 +635,10 @@ void Host::handle(const fx::PointerAt& e) {
             r.template send<wl_pointer::events::leave>(display_.next_serial(), nonnull<wl_surface>(pointer_focus_->id));
         });
         pointer_focus_ = over;
+        // The new client sets its own cursor on enter; over nothing (the
+        // gaps, the bar) the pointer is the default arrow.
+        cursor_surface_ = nullptr;
+        if (!over) publish_cursor({link::down::CursorShape{1}});
         each(over, [&](auto& r) {
             r.template send<wl_pointer::events::enter>(display_.next_serial(), nonnull<wl_surface>(over->id), x, y);
         });
@@ -892,6 +922,84 @@ void Host::bind_syncobj(srv::Client& client, std::uint32_t version, id_t id) {
     });
     l->on<M::requests::destroy>([] {});
     client.bind_resource<M, 1>(id, l, version);
+}
+
+// -- cursor ------------------------------------------------------------------------
+//
+// The pointer is drawn by the head's platform, on its own cursor plane, so
+// it moves at the head machine's speed and never waits on the link or on a
+// client. i4d only says what it should look like: a named shape (the head's
+// theme draws it), the client's own image, or nothing.
+//
+// A cursor image is the one place i4d reads client pixels: it is tiny (24-64
+// px square, a few KB), changes rarely, and copying it lets the buffer go
+// back to the client at once instead of across a network round trip.
+
+void Host::publish_cursor(link::down::Cursor c) { emit(ev::CursorChanged{std::move(c)}); }
+
+void Host::cursor_committed(Surface& s) {
+    // wl_surface.offset moves the image; the hotspot stays on the pointer.
+    s.hot_x -= std::exchange(s.offset_x, 0);
+    s.hot_y -= std::exchange(s.offset_y, 0);
+    if (!s.current.buffer) return;
+    const id_t bid = *s.current.buffer;
+    auto it = buffers_.find({s.client, bid});
+    if (it == buffers_.end()) return;
+    const auto give_back = [&] { srv::Resource<wl_buffer, 1>{s.client, bid}.send<wl_buffer::events::release>(); };
+    if (&s != cursor_surface_) return give_back();
+
+    const auto* shm = std::get_if<ShmBuffer>(&it->second);
+    const bool argb = shm && shm->format == wl_shm::format::argb8888;
+    const bool xrgb = shm && shm->format == wl_shm::format::xrgb8888;
+    if (!argb && !xrgb) {
+        // A GPU cursor buffer (rare): i4d never maps those. The arrow it is.
+        publish_cursor({link::down::CursorShape{1}});
+        return give_back();
+    }
+    link::down::CursorImage img;
+    img.width = shm->width;
+    img.height = shm->height;
+    img.hot_x = s.hot_x;
+    img.hot_y = s.hot_y;
+    const auto row = static_cast<std::size_t>(shm->width) * 4;
+    struct stat st{};
+    if (shm->width <= 0 || shm->height <= 0 || shm->width > 512 || shm->height > 512 || shm->offset < 0 ||
+        static_cast<std::size_t>(shm->stride) < row || ::fstat(shm->pool->fd.get(), &st) != 0)
+        return give_back();
+    const auto need = static_cast<std::size_t>(shm->offset) +
+                      static_cast<std::size_t>(shm->stride) * static_cast<std::size_t>(shm->height - 1) + row;
+    if (need > static_cast<std::size_t>(st.st_size)) return give_back();
+    void* p = ::mmap(nullptr, need, PROT_READ, MAP_SHARED, shm->pool->fd.get(), 0);
+    if (p == MAP_FAILED) return give_back();
+    img.argb.resize(row * static_cast<std::size_t>(shm->height));
+    for (std::int32_t y = 0; y < shm->height; ++y)
+        std::memcpy(img.argb.data() + row * static_cast<std::size_t>(y),
+                    static_cast<const char*>(p) + shm->offset + static_cast<std::size_t>(shm->stride) * y, row);
+    ::munmap(p, need);
+    if (xrgb)  // opaque: every alpha byte (little-endian ARGB: byte 3) is 0xff
+        for (std::size_t i = 3; i < img.argb.size(); i += 4) img.argb[i] = static_cast<char>(0xff);
+    give_back();
+    publish_cursor({std::move(img)});
+}
+
+void Host::bind_cursor_shape(srv::Client& client, std::uint32_t version, id_t id) {
+    using M = wp_cursor_shape_manager_v1;
+    using D = wp_cursor_shape_device_v1;
+    auto l = std::make_shared<srv::RequestListener<M>>();
+    const auto device = [this, &client](auto&& dev) {
+        auto dl = std::make_shared<srv::RequestListener<D>>();
+        dl->template on<D::requests::set_shape>([this, &client](std::uint32_t, D::shape shape) {
+            if (!pointer_focus_ || pointer_focus_->client != &client) return;
+            cursor_surface_ = nullptr;
+            publish_cursor({link::down::CursorShape{static_cast<std::uint32_t>(shape)}});
+        });
+        dl->template on<D::requests::destroy>([] {});
+        dev.template bind<2>(dl);
+    };
+    l->on<M::requests::get_pointer>([device](srv::NewObject<D> d, Ref<wl_pointer>) { device(d); });
+    l->on<M::requests::get_tablet_tool_v2>([device](srv::NewObject<D> d, Ref<zwp_tablet_tool_v2>) { device(d); });
+    l->on<M::requests::destroy>([] {});
+    client.bind_resource<M, 2>(id, l, version);
 }
 
 // -- the clipboard: wl_data_device_manager --------------------------------------------

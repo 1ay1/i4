@@ -31,7 +31,8 @@ std::expected<void, Replica::Error> Replica::receive(const Down& d) {
         // Nor is the app list: the head's launcher keeps it.
         [&](const down::Apps&) -> R { return {}; },
         [&](const down::Notice&) -> R { return {}; },
-        [&](const down::Timeline&) -> R { return {}; });
+        [&](const down::Timeline&) -> R { return {}; },
+        [&](const down::Cursor&) -> R { return {}; });
 }
 
 void Replica::rebuild() {

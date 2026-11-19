@@ -100,11 +100,12 @@ TEST(a_head_is_welcomed_with_the_state_and_hears_every_event) {
     h.record().clear();
     const auto head = attach(h);
     auto sent = all<do_send>(h);
-    CHECK_EQ(sent.size(), 2u);  // Welcome, then what it can launch
+    CHECK_EQ(sent.size(), 3u);  // Welcome, what it can launch, how the pointer looks
     const auto* welcome = std::get_if<link::down::Welcome>(&sent.at(0).message);
     CHECK(welcome != nullptr);
     CHECK(welcome && welcome->state == h.model().session.state());
-    CHECK(sent.size() == 2 && is<link::down::Apps>(sent.at(1).message));
+    CHECK(sent.size() == 3 && is<link::down::Apps>(sent.at(1).message));
+    CHECK(sent.size() == 3 && is<link::down::Cursor>(sent.at(2).message));
 
     h.send(ev::Mapped{wm::WindowId{2}, app("b")});
     sent = all<do_send>(h);
@@ -225,6 +226,22 @@ TEST(a_failed_launch_says_so) {
     const auto sent = h.effects<do_send>();
     const auto* n = sent.empty() ? nullptr : std::get_if<link::down::Notice>(&sent.at(0).message);
     CHECK(n && n->text == "nosuchapp failed (exit 127)");
+}
+
+TEST(the_cursor_goes_to_every_head_and_to_new_ones_at_once) {
+    H h;
+    h.send(ev::OutputReady{output()});
+    const auto one = attach(h, 1);
+    h.record().clear();
+    const link::down::Cursor text{link::down::CursorShape{9}};
+    h.send(ev::CursorChanged{text});
+    auto sent = all<do_send>(h);
+    CHECK(sent.size() == 1 && sent.at(0).to == std::vector<HeadId>{one} && sent.at(0).message == link::Down{text});
+    h.send(ev::CursorChanged{text});
+    CHECK(all<do_send>(h).empty());  // unchanged: nothing said
+    const auto two = attach(h, 2);
+    sent = all<do_send>(h);
+    CHECK(std::ranges::any_of(sent, [&](const auto& s) { return s.to == std::vector<HeadId>{two} && s.message == link::Down{text}; }));
 }
 
 TEST(a_head_that_leaves_with_a_key_down_lets_go_of_it) {

@@ -112,6 +112,12 @@ struct Forget {
     wm::WindowId window;
 };
 using do_forget = jaal::pure_fx<Forget, "head.forget">;
+/// Show the pointer like this, on the platform's own cursor (zero added
+/// latency: the pointer never waits for a frame or the link).
+struct ShowCursor {
+    link::down::Cursor cursor;
+};
+using do_cursor = jaal::pure_fx<ShowCursor, "head.cursor">;
 
 // -- the program -----------------------------------------------------------------------
 
@@ -172,7 +178,8 @@ struct Head {
                              mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, ClearNotice,
                              mayag::CloseRequest, KeyInput, KeymapInput, RepeatInput, ModsInput, KeyboardLeft,
                              ScrollInput, mayag::ScrollEvent>;
-    using Cmd = mayag::Cmd<Msg, do_say, do_forget, mayag::upload_image, mayag::release_image, mayag::set_title>;
+    using Cmd = mayag::Cmd<Msg, do_say, do_forget, do_cursor, mayag::upload_image, mayag::release_image,
+                           mayag::set_title>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model& m);

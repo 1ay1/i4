@@ -191,6 +191,14 @@ Cmd Session::update(Model& m, ev::HeadJoined e) {
     return {};
 }
 
+Cmd Session::update(Model& m, ev::CursorChanged e) {
+    if (e.cursor == m.cursor) return {};
+    m.cursor = std::move(e.cursor);
+    auto to = welcomed(m);
+    if (to.empty()) return {};
+    return fx::Send{std::move(to), link::Down{m.cursor}};
+}
+
 Cmd Session::update(Model& m, ev::HeadLeft e) {
     std::vector<Cmd> out;
     if (auto it = m.heads.find(e.head); it != m.heads.end())
@@ -228,6 +236,7 @@ Cmd Session::update(Model& m, ev::HeadSaid e) {
         m.heads[e.head].welcomed = true;
         // What it can launch, then every window's current pixels.
         out.push_back(fx::Send{{e.head}, link::Down{link::down::Apps{m.apps}}});
+        out.push_back(fx::Send{{e.head}, link::Down{m.cursor}});
         for (const auto& [w, g] : m.generation) out.push_back(fx::Share{{e.head}, w});
     }
     if (reply.step) {
