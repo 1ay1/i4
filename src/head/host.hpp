@@ -127,6 +127,12 @@ public:
         ask_refresh(lost);
     }
 
+    void refresh(wm::WindowId w) {
+        remote::Reassembly::Lost lost;
+        lost.windows.push_back(w.value);
+        ask_refresh(lost);
+    }
+
     void ask_refresh(const remote::Reassembly::Lost& lost) {
         if (lost.unknown > 0)
             (void)link_.send(link::encode(link::Up{link::up::Refresh{std::nullopt}}));
@@ -155,10 +161,15 @@ public:
             Heard h{std::move(*d), std::nullopt, 0};
             const auto* c = std::get_if<link::down::Content>(&h.message);
             // Datagrams may arrive late: an older frame of a window never
-            // replaces a newer one.
+            // replaces a newer one. But a dropped delta's tiles are gone (the
+            // session diffs against what it SENT), so ask for the window
+            // whole again rather than keep its stale pixels.
             if (c) {
                 auto& g = generation_[c->window];
-                if (c->generation < g) return;
+                if (c->generation < g) {
+                    refresh(c->window);
+                    return;
+                }
                 g = c->generation;
             }
             if (c && std::holds_alternative<link::down::Video>(c->layout)) {
@@ -230,6 +241,8 @@ public:
                         pd.rects = std::move(written);
                     }
                     h.patch = jaal::shared<mayag::PatchData>::make(std::move(pd));
+                } else {
+                    refresh(c->window);  // a delta without its base: start over
                 }
                 if (trace_)
                     std::fprintf(stderr, "i4-head: remote frame %dx%d  %zu tiles  %zu bytes  %.3f ms\n", c->size.width,

@@ -185,9 +185,14 @@ void Host::read_head(HeadId id) {
         if (const auto* r = std::get_if<link::up::Refresh>(&*up)) {
             // A frame was lost beyond repair: the next of that window stands
             // alone (a new stream starts with a keyframe), and goes now.
+            // Tiles too: the shadow already holds the lost frame, so a diff
+            // against it would never resend what only that frame changed and
+            // the head would keep stale pixels there. Forgetting it makes
+            // the next tile frame a keyframe.
             auto& h = it->second;
             for (auto& [w, s] : h.streams)
                 if (s && (!r->window || *r->window == w)) encoder_.refresh(*s);
+            std::erase_if(h.shadow, [&](const auto& kv) { return !r->window || *r->window == kv.first; });
             ++h.refreshes;
             if (std::getenv("I4D_TRACE") != nullptr)
                 std::fprintf(stderr, "i4d: head %u asked to refresh %s\n", id.value,
