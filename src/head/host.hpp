@@ -122,16 +122,36 @@ public:
                 heard(p);
             }
         }
+        check_losses();
+    }
+
+    /// Frames given up on (beyond repair, or stalled past `quiet`) mark their
+    /// windows broken and ask for them whole; a refresh nobody answered is
+    /// asked again. Called after every read and every present.
+    void check_losses() {
         auto lost = reassembly_.expire(1);
-        auto quiet = reassembly_.expire_quiet(std::chrono::steady_clock::now(), std::chrono::milliseconds(3));
+        // A frame that stops arriving mid-way is given up after `quiet`. Wi-Fi
+        // stalls for tens of ms (power save, retries), so 3 ms declared big
+        // keyframes lost while their fragments were still on the way, and
+        // each refresh sent another big keyframe into the same stall.
+        static const auto quiet_ms = [] {
+            const char* q = std::getenv("I4_UDP_QUIET_MS");
+            return std::chrono::milliseconds(q && *q ? std::atoi(q) : 25);
+        }();
+        auto quiet = reassembly_.expire_quiet(std::chrono::steady_clock::now(), quiet_ms);
         lost.windows.insert(lost.windows.end(), quiet.windows.begin(), quiet.windows.end());
+        lost.unknown += quiet.unknown;
         // A lost frame may have been a video delta: every later delta of that
         // window references it, so they would decode to a smear (unchanged
         // blocks copy the wrong reference). Show none until a keyframe.
         for (auto w : lost.windows) broken_.insert(wm::WindowId{w});
         if (lost.unknown > 0)
             for (const auto& [w, d] : decoders_) broken_.insert(w);
-        ask_refresh(lost);
+        // A window still waiting on its keyframe (the keyframe itself may
+        // have been lost) is asked again once its last ask is stale.
+        for (const auto& w : broken_)
+            if (std::ranges::find(lost.windows, w.value) == lost.windows.end()) lost.windows.push_back(w.value);
+        ask_refresh(lost, false);
     }
 
     void refresh(wm::WindowId w) {
@@ -140,15 +160,35 @@ public:
         ask_refresh(lost);
     }
 
-    void ask_refresh(const remote::Reassembly::Lost& lost) {
-        if (lost.unknown > 0)
-            (void)link_.send(link::encode(link::Up{link::up::Refresh{std::nullopt}}));
-        else
+    /// Ask the session to resend windows whole. One ask per window stands
+    /// until its keyframe arrives (or 250 ms pass): several loss reports in
+    /// a burst would otherwise bring the same large keyframe several times,
+    /// and on a lossy link each copy risks more losses.
+    void ask_refresh(const remote::Reassembly::Lost& lost, bool report = true) {
+        const auto now = std::chrono::steady_clock::now();
+        constexpr auto again = std::chrono::milliseconds(250);
+        auto due = [&](std::optional<std::chrono::steady_clock::time_point>& at) {
+            if (at && now - *at < again) return false;
+            at = now;
+            return true;
+        };
+        std::size_t asked = 0;
+        if (lost.unknown > 0) {
+            if (due(asked_all_)) {
+                (void)link_.send(link::encode(link::Up{link::up::Refresh{std::nullopt}}));
+                for (const auto& [w, d] : decoders_) asked_[w] = now;
+                ++asked;
+            }
+        } else {
             for (auto w : lost.windows)
-                (void)link_.send(link::encode(link::Up{link::up::Refresh{wm::WindowId{w}}}));
-        if (trace_ && (lost.unknown > 0 || !lost.windows.empty()))
-            std::fprintf(stderr, "i4-head: frames lost beyond repair (%zu windows, %zu unknown): refresh asked\n",
-                         lost.windows.size(), lost.unknown);
+                if (due(asked_[wm::WindowId{w}])) {
+                    (void)link_.send(link::encode(link::Up{link::up::Refresh{wm::WindowId{w}}}));
+                    ++asked;
+                }
+        }
+        if (trace_ && (asked > 0 || (report && (lost.unknown > 0 || !lost.windows.empty()))))
+            std::fprintf(stderr, "i4-head: frames lost beyond repair (%zu windows, %zu unknown): %s\n",
+                         lost.windows.size(), lost.unknown, asked ? "refresh asked" : "refresh already pending");
     }
 
     /// Say hello on UDP (the session learns where frames go) and keep the
@@ -192,7 +232,11 @@ public:
                     if (trace_) std::fprintf(stderr, "i4-head: video delta skipped (waiting for a keyframe)\n");
                     return;
                 }
-                if (v.keyframe) broken_.erase(c->window);
+                if (v.keyframe) {
+                    broken_.erase(c->window);
+                    asked_.erase(c->window);  // the refresh is answered
+                    asked_all_.reset();
+                }
                 auto& dec = decoders_[c->window];
                 if (!dec) dec = std::make_unique<remote::Decoder>();
                 if (auto pic = dec->decode(v, c->size.width, c->size.height)) {
@@ -235,6 +279,11 @@ public:
                 const auto& e = std::get<link::down::Encoded>(c->layout);
                 std::vector<std::array<int, 4>> written;
                 if (remote::apply_rgba(pic.rgba, c->size.width, c->size.height, e, written)) {
+                    if (e.keyframe) {
+                        broken_.erase(c->window);
+                        asked_.erase(c->window);
+                        asked_all_.reset();
+                    }
                     pic.width = c->size.width;
                     pic.height = c->size.height;
                     mayag::PatchData pd;
@@ -311,8 +360,7 @@ public:
         }
         const bool want = link_.wants_write();
         udp_hello();
-        if (reassembly_.pending())
-            ask_refresh(reassembly_.expire_quiet(std::chrono::steady_clock::now(), std::chrono::milliseconds(3)));
+        if (udp_) check_losses();
         if (reg_ && want != writing_ && reg_->modify(want ? jaal::interest::read_write : jaal::interest::read))
             writing_ = want;
     }
@@ -321,7 +369,7 @@ public:
     /// again shortly: a fence check is all it costs.
     [[nodiscard]] auto wait_hint() const noexcept {
         auto hint = window_.wait_hint();
-        if (gpu_busy_ || reassembly_.pending()) {
+        if (gpu_busy_ || reassembly_.pending() || !broken_.empty()) {
             constexpr std::chrono::nanoseconds soon{1'000'000};
             hint = hint ? std::min(*hint, soon) : soon;
         }
@@ -572,6 +620,8 @@ private:
         canvases_.erase(w);
         decoders_.erase(w);
         pictures_.erase(w);
+        broken_.erase(w);
+        asked_.erase(w);
         auto it = windows_.find(w);
         if (it == windows_.end()) return;
         if constexpr (local_gpu)
@@ -618,6 +668,9 @@ private:
     std::map<wm::WindowId, std::unique_ptr<remote::Decoder>> decoders_;  // remote video, per window
     std::map<wm::WindowId, remote::Picture> pictures_;  // the last decoded picture, to diff against
     std::set<wm::WindowId> broken_;  // a video frame was lost: deltas wait for a keyframe
+    /// Refreshes asked and not yet answered by a keyframe (see ask_refresh).
+    std::map<wm::WindowId, std::optional<std::chrono::steady_clock::time_point>> asked_;
+    std::optional<std::chrono::steady_clock::time_point> asked_all_;
     std::uint32_t next_texture_ = 0x2000'0000u;
     std::vector<GpuDone> gpu_done_;
     bool gpu_busy_ = false;
