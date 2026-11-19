@@ -100,7 +100,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto window = std::move(*opened);
-    if (fullscreen) window.set_fullscreen(true);
+    if (fullscreen) {
+        if constexpr (requires { window.set_fullscreen(true); }) window.set_fullscreen(true);
+        else std::fprintf(stderr, "i4-head: this platform's window cannot go fullscreen yet\n");
+    }
     if (cfg.fonts == nullptr) cfg.fonts = mayag::typo::system::default_stack();
 
     jaal::run_options opt;
