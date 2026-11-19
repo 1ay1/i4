@@ -29,7 +29,8 @@ std::expected<void, Replica::Error> Replica::receive(const Down& d) {
         // replica has nothing to do with them.
         [&](const down::Content&) -> R { return {}; },
         // Nor is the app list: the head's launcher keeps it.
-        [&](const down::Apps&) -> R { return {}; });
+        [&](const down::Apps&) -> R { return {}; },
+        [&](const down::Notice&) -> R { return {}; });
 }
 
 void Replica::rebuild() {

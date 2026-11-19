@@ -43,6 +43,16 @@ struct Session {
         std::optional<wm::WindowId> pointer;
         std::map<HeadId, Head> heads;
         std::vector<link::App> apps;
+
+        /// Launches still running, and how many windows had been mapped
+        /// when each began: one that ends with that count unchanged opened
+        /// nothing here (it failed, or handed off to an instance elsewhere).
+        struct Launch {
+            std::string command;
+            std::uint64_t maps_at_start;
+        };
+        std::map<LaunchId, Launch> launches;
+        std::uint64_t maps = 0;
     };
 
     using Msg = Event;
@@ -61,6 +71,8 @@ struct Session {
     static Cmd update(Model& m, ev::HeadSaid e);
     static Cmd update(Model& m, ev::HeadLeft e);
     static Cmd update(Model& m, ev::AppsFound e);
+    static Cmd update(Model& m, ev::Launched e);
+    static Cmd update(Model& m, ev::Exited e);
 
     // The host's events are the program's messages, one for one.
     template <class E>

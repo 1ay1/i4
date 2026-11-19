@@ -34,6 +34,8 @@ namespace i4::server {
 
 /// A head attached over the link: one connection.
 using HeadId = Id<struct HeadTag>;
+/// One `exec`: a process i4d started.
+using LaunchId = Id<struct LaunchTag>;
 
 // -- events: host -> program -------------------------------------------------
 
@@ -54,10 +56,14 @@ struct HeadSaid { HeadId head; link::Up message; };
 struct HeadLeft { HeadId head; };
 /// What can be launched here (the .desktop files), scanned off the loop.
 struct AppsFound { std::vector<link::App> apps; };
+/// fx::Spawn's answer: the process started (or could not).
+struct Launched { LaunchId launch; std::string command; bool started; };
+/// A launched process ended, and was reaped.
+struct Exited { LaunchId launch; bool signalled; std::int32_t code; };
 }  // namespace ev
 
 using Event = std::variant<ev::OutputReady, ev::Mapped, ev::Retitled, ev::Unmapped, ev::Committed,
-                           ev::HeadJoined, ev::HeadSaid, ev::HeadLeft, ev::AppsFound>;
+                           ev::HeadJoined, ev::HeadSaid, ev::HeadLeft, ev::AppsFound, ev::Launched, ev::Exited>;
 
 // -- effects: program -> host ---------------------------------------------------
 //
@@ -84,6 +90,7 @@ struct Share { std::vector<HeadId> to; wm::WindowId window; };
 struct FramesDone { wm::WindowId window; std::uint64_t generation; };
 /// Disconnect a head that broke the protocol.
 struct Drop { HeadId head; };
+/// Start a process in the session (answered by ev::Launched).
 struct Spawn { std::string command; };
 }  // namespace fx
 

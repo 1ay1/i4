@@ -14,6 +14,9 @@
 
 #include <mayag/mayag.hpp>
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -68,8 +71,17 @@ public:
             auto d = link::decode<link::Down>(p.bytes);
             if (!d) continue;
             Heard h{std::move(*d), std::nullopt};
-            if (const auto* c = std::get_if<link::down::Content>(&h.message); c && !p.fds.empty())
+            if (const auto* c = std::get_if<link::down::Content>(&h.message); c && !p.fds.empty()) {
+                const auto t0 = std::chrono::steady_clock::now();
                 h.pixels = frame(*c, p.fds.front());
+                if (trace_) {
+                    const auto t1 = std::chrono::steady_clock::now();
+                    auto ms = [](auto dt) { return std::chrono::duration<double, std::milli>(dt).count(); };
+                    std::fprintf(stderr, "i4-head: frame %dx%d  convert %.2f ms  key->frame %.1f ms\n", c->size.width,
+                                 c->size.height, ms(t1 - t0), last_key_ ? ms(t0 - *last_key_) : -1.0);
+                    last_key_.reset();
+                }
+            }
             emit_(std::move(h));
         }
     }
@@ -107,7 +119,11 @@ public:
     decltype(auto) handle(const E& e) {
         return window_.handle(e);
     }
-    void handle(const Say& s) { (void)link_.send(link::encode(s.message)); }
+    void handle(const Say& s) {
+        if (trace_ && std::holds_alternative<link::up::Key>(s.message) && !last_key_)
+            last_key_ = std::chrono::steady_clock::now();
+        (void)link_.send(link::encode(s.message));
+    }
 
     [[nodiscard]] Window& window() { return window_; }
 
@@ -149,6 +165,8 @@ private:
     std::function<jaal::result<jaal::platform::native_reactor::registration>(int, jaal::interest, std::uint64_t)> watch_;
     std::function<void(Events)> emit_;
     Narrow narrow_{this};
+    bool trace_ = std::getenv("I4_HEAD_TRACE") != nullptr;
+    std::optional<std::chrono::steady_clock::time_point> last_key_;
     std::optional<jaal::platform::native_reactor::registration> reg_;
     bool writing_ = false;
 };

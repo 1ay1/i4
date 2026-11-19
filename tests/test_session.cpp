@@ -189,6 +189,44 @@ TEST(clicking_a_window_focuses_it_and_input_goes_there) {
     CHECK(keys.size() == 1 && keys.at(0).code == 30 && keys.at(0).mods.has(wm::Mod::shift));
 }
 
+TEST(an_app_that_opens_nothing_here_is_reported) {
+    // Chrome already running on another display: the launched process
+    // hands its window over and exits cleanly, having mapped nothing.
+    H h;
+    h.send(ev::OutputReady{output()});
+    const auto head = attach(h);
+    h.send(ev::Launched{LaunchId{1}, "/usr/bin/google-chrome-stable --x", true});
+    h.record().clear();
+    h.send(ev::Exited{LaunchId{1}, false, 0});
+    const auto sent = h.effects<do_send>();
+    CHECK(sent.size() == 1 && sent.at(0).to == std::vector<HeadId>{head});
+    const auto* n = sent.empty() ? nullptr : std::get_if<link::down::Notice>(&sent.at(0).message);
+    CHECK(n && n->text.starts_with("google-chrome-stable opened nothing here"));
+}
+
+TEST(an_app_that_opened_a_window_exits_quietly) {
+    H h;
+    h.send(ev::OutputReady{output()});
+    attach(h);
+    h.send(ev::Launched{LaunchId{1}, "foot", true});
+    h.send(ev::Mapped{wm::WindowId{1}, app("foot")});
+    h.record().clear();
+    h.send(ev::Exited{LaunchId{1}, false, 0});
+    CHECK(h.effects<do_send>().empty());
+}
+
+TEST(a_failed_launch_says_so) {
+    H h;
+    h.send(ev::OutputReady{output()});
+    attach(h);
+    h.send(ev::Launched{LaunchId{1}, "nosuchapp", true});
+    h.record().clear();
+    h.send(ev::Exited{LaunchId{1}, false, 127});
+    const auto sent = h.effects<do_send>();
+    const auto* n = sent.empty() ? nullptr : std::get_if<link::down::Notice>(&sent.at(0).message);
+    CHECK(n && n->text == "nosuchapp failed (exit 127)");
+}
+
 TEST(when_the_last_head_leaves_no_client_waits_forever) {
     H h;
     h.send(ev::OutputReady{output()});

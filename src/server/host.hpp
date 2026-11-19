@@ -115,7 +115,8 @@ public:
         std::string keyboard_layout = "us";
         /// The session's output, until heads report theirs.
         wm::OutputInfo output{"i4-0", {0, 0, 1920, 1080}};
-        std::function<void(const std::string&)> spawn;
+        /// WAYLAND_DISPLAY for everything the session launches.
+        std::string wayland_display = "wayland-i4";
     };
 
     Host(Options options, transport::Fd link_listener);
@@ -153,7 +154,8 @@ public:
     void handle(const fx::Share& e);
     void handle(const fx::FramesDone& e);
     void handle(const fx::Drop& e);
-    void handle(const fx::Spawn& e);
+    /// Answers with ev::Launched: the program learns its launch's id.
+    Event handle(const fx::Spawn& e);
 
 private:
     using Registration = jaal::platform::native_reactor::registration;
@@ -191,6 +193,15 @@ private:
     void read_head(HeadId id);
     void drop_head(HeadId id);
     void rewatch(HeadId id);
+
+    // launches (host.cpp)
+    void reap(LaunchId id);
+    struct Running {
+        jaal::platform::native_process process;
+        std::optional<Registration> exit;
+    };
+    std::map<LaunchId, Running> launches_;
+    LaunchId next_launch_{1};
 
     Options options_;
     std::optional<Keymap> keymap_;

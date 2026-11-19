@@ -73,4 +73,7 @@ using Textures = std::map<wm::WindowId, std::uint32_t>;
 [[nodiscard]] mayag::Node launcher_view(const Launcher& l, const std::vector<link::App>& apps,
                                         Size<space::Desktop> screen);
 
+/// A session notice, as a toast along the bottom of the screen.
+[[nodiscard]] mayag::Node notice_view(const std::string& text, Size<space::Desktop> screen);
+
 }  // namespace i4::head

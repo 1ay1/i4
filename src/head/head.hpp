@@ -98,13 +98,17 @@ struct Head {
         /// and a TextEvent equal to it (any case) is dropped. Every KeyEvent
         /// resets it, so it can never eat the text of a different key.
         std::string swallow;
+        /// A notice from the session, shown until a timer clears it.
+        std::string notice;
     };
 
     struct Tick {
         double dt;
     };
+    struct ClearNotice {};
     using Msg = std::variant<Heard, Lost, mayag::KeyEvent, mayag::TextEvent, mayag::Clicked, mayag::MouseMove,
-                             mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, mayag::CloseRequest>;
+                             mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, ClearNotice,
+                             mayag::CloseRequest>;
     using Cmd = mayag::Cmd<Msg, do_say, mayag::upload_image, mayag::release_image, mayag::set_title>;
     using Sub = mayag::Sub<Msg>;
 
@@ -119,6 +123,7 @@ struct Head {
     static Cmd update(Model& m, mayag::MouseUp e);
     static Cmd update(Model& m, mayag::ResizeEvent e);
     static Cmd update(Model& m, Tick t);
+    static Cmd update(Model& m, ClearNotice);
     static Cmd update(Model& m, mayag::CloseRequest);
 
     template <class E>

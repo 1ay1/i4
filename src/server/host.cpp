@@ -8,12 +8,15 @@
 
 #include "i4/base/match.hpp"
 
+extern char** environ;
+
 namespace i4::server {
 
 namespace {
 
 constexpr std::uint64_t kListener = 1;
 constexpr std::uint64_t kHeadBase = 1u << 16;     // + head id
+constexpr std::uint64_t kLaunchBase = 1u << 20;   // + launch id
 constexpr std::uint64_t kWaylandBase = 1u << 24;  // + i4::wl's key
 
 }  // namespace
@@ -47,6 +50,9 @@ void Host::release() {
     heads_.clear();
     wayland_.clear();
     listener_reg_.reset();
+    // Launched apps outlive the session's loop (they are the user's), but
+    // their exit watches do not.
+    for (auto& [id, r] : launches_) r.exit.reset();
     emit_ = nullptr;
     watch_ = nullptr;
 }
@@ -57,6 +63,8 @@ void Host::ready(const jaal::readiness& r) {
         if (r.hangup) what = what | srv::Ready::hangup;
         if (r.error) what = what | srv::Ready::error;
         display_.ready(r.token - kWaylandBase, what);
+    } else if (r.token >= kLaunchBase) {
+        reap(LaunchId{static_cast<std::uint32_t>(r.token - kLaunchBase)});
     } else if (r.token >= kHeadBase) {
         const HeadId id{static_cast<std::uint32_t>(r.token - kHeadBase)};
         auto it = heads_.find(id);
@@ -165,8 +173,58 @@ void Host::handle(const fx::Share& e) {
     }
 }
 
-void Host::handle(const fx::Spawn& e) {
-    if (options_.spawn) options_.spawn(e.command);
+Event Host::handle(const fx::Spawn& e) {
+    // `exec` is a shell command (as in i3), so it runs under sh -c; argv is
+    // explicit, never re-parsed. The environment says THIS session is the
+    // display, and nothing else is:
+    //   * WAYLAND_DISPLAY is ours
+    //   * DISPLAY is removed: i4 has no Xwayland yet, and a toolkit that fell
+    //     back to X11 would open on whatever X server the parent knew about,
+    //     on another screen, silently
+    //   * XDG_SESSION_TYPE=wayland, so Chromium/Electron's ozone "auto"
+    //     picks Wayland
+    namespace pf = jaal::platform;
+    pf::process_spec spec;
+    spec.argv = {"sh", "-c", e.command};
+    spec.env_is_complete = true;
+    for (char** env = environ; *env != nullptr; ++env) {
+        const std::string_view kv = *env;
+        const auto eq = kv.find('=');
+        if (eq == std::string_view::npos) continue;
+        const auto key = kv.substr(0, eq);
+        if (key == "DISPLAY" || key == "WAYLAND_DISPLAY" || key == "WAYLAND_SOCKET" || key == "XDG_SESSION_TYPE")
+            continue;
+        spec.env.emplace_back(std::string(key), std::string(kv.substr(eq + 1)));
+    }
+    spec.env.emplace_back("WAYLAND_DISPLAY", options_.wayland_display);
+    spec.env.emplace_back("XDG_SESSION_TYPE", "wayland");
+    spec.stdin_from = pf::stream_to::null;
+    spec.stdout_to = pf::stream_to::inherit;
+    spec.stderr_to = pf::stream_to::inherit;
+
+    const auto id = next_launch_;
+    next_launch_ = next_launch_.next();
+    auto p = pf::native_process::spawn(spec);
+    if (!p) {
+        std::fprintf(stderr, "i4d: cannot run: %s\n", e.command.c_str());
+        return ev::Launched{id, e.command, false};
+    }
+    Running r{std::move(*p), std::nullopt};
+    // Its exit is one more readiness on the same reactor, reaped there:
+    // nothing is left a zombie, and the session hears how it ended.
+    if (auto reg = watch_(r.process.exit_handle().get(), jaal::interest::read, kLaunchBase + id.value))
+        r.exit.emplace(std::move(*reg));
+    launches_.emplace(id, std::move(r));
+    return ev::Launched{id, e.command, true};
+}
+
+void Host::reap(LaunchId id) {
+    auto it = launches_.find(id);
+    if (it == launches_.end()) return;
+    auto status = it->second.process.reap();
+    if (!status) return;  // not ended yet (a spurious wake): keep watching
+    launches_.erase(it);
+    emit(ev::Exited{id, status->how == jaal::platform::exit_status::kind::signalled, status->code});
 }
 
 }  // namespace i4::server

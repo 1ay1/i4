@@ -72,6 +72,45 @@ Cmd Session::update(Model& m, ev::AppsFound e) {
     return {};
 }
 
+namespace {
+
+/// The program's name, for a person: "google-chrome-stable" from
+/// "/usr/bin/google-chrome-stable --incognito".
+std::string program(const std::string& command) {
+    auto first = command.substr(0, command.find(' '));
+    if (auto slash = first.rfind('/'); slash != std::string::npos) first = first.substr(slash + 1);
+    return first;
+}
+
+Cmd tell(const Model& m, std::string text) {
+    auto to = welcomed(m);
+    if (to.empty()) return {};
+    return fx::Send{std::move(to), link::Down{link::down::Notice{std::move(text)}}};
+}
+
+}  // namespace
+
+Cmd Session::update(Model& m, ev::Launched e) {
+    if (!e.started) return tell(m, "could not start " + program(e.command));
+    m.launches[e.launch] = {std::move(e.command), m.maps};
+    return {};
+}
+
+Cmd Session::update(Model& m, ev::Exited e) {
+    auto it = m.launches.find(e.launch);
+    if (it == m.launches.end()) return {};
+    const auto launch = std::move(it->second);
+    m.launches.erase(it);
+    if (m.maps != launch.maps_at_start) return {};  // something opened here: fine
+    const auto name = program(launch.command);
+    if (e.signalled) return tell(m, name + " was killed by signal " + std::to_string(e.code));
+    if (e.code != 0) return tell(m, name + " failed (exit " + std::to_string(e.code) + ")");
+    // Exited cleanly having opened nothing: almost always a single-instance
+    // app (Chrome, Firefox, VS Code) passing the request to a copy already
+    // running on another display.
+    return tell(m, name + " opened nothing here: is it already running on another display?");
+}
+
 Cmd Session::update(Model& m, ev::OutputReady e) {
     std::vector<Cmd> out;
     step(m, wm::ev::OutputAdded{std::move(e.info)}, std::nullopt, out);
@@ -79,6 +118,7 @@ Cmd Session::update(Model& m, ev::OutputReady e) {
 }
 
 Cmd Session::update(Model& m, ev::Mapped e) {
+    ++m.maps;
     std::vector<Cmd> out;
     step(m, wm::ev::WindowMapped{e.window, std::move(e.info)}, std::nullopt, out);
     return done(std::move(out));

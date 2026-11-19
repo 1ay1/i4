@@ -11,6 +11,7 @@
 // window under the pointer, as in i3).
 #include "head.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
@@ -77,7 +78,7 @@ Cmd Head::update(Model& m, Heard h) {
         if (h.pixels) {
             auto [it, fresh] = m.textures.try_emplace(c->window, m.next_texture);
             if (fresh) ++m.next_texture;
-            if (std::getenv("I4_HEAD_TRACE") != nullptr) {
+            if (false) {
                 // The centre pixel, so a trace shows real content arrived.
                 const auto& img = h.pixels->get();
                 const auto i = (static_cast<std::size_t>(img.height / 2) * img.width + img.width / 2) * 4;
@@ -95,6 +96,11 @@ Cmd Head::update(Model& m, Heard h) {
         m.apps = a->apps;
         if (m.launcher.open) m.launcher.refilter(m.apps);
         return {};
+    }
+    if (const auto* n = std::get_if<link::down::Notice>(&h.message)) {
+        m.notice = n->text;
+        // Keyed: a newer notice replaces this timer, so it gets its full time.
+        return Cmd::after("notice", std::chrono::milliseconds{6000}, ClearNotice{});
     }
 
     if (auto ok = m.replica.receive(h.message); !ok) {
@@ -122,7 +128,7 @@ Cmd Head::update(Model& m, Lost) {
 }
 
 Cmd Head::update(Model& m, mayag::KeyEvent k) {
-    if (std::getenv("I4_HEAD_TRACE") != nullptr)
+    if (false)
         std::fprintf(stderr, "i4-head: key %d mods s%d c%d a%d m%d ready=%d launcher=%d apps=%zu\n",
                      static_cast<int>(k.key), k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.super,
                      m.replica.ready(), m.launcher.open, m.apps.size());
@@ -168,7 +174,7 @@ Cmd Head::update(Model& m, mayag::KeyEvent k) {
 }
 
 Cmd Head::update(Model& m, mayag::TextEvent t) {
-    if (std::getenv("I4_HEAD_TRACE") != nullptr) std::fprintf(stderr, "i4-head: text '%s'\n", t.text.c_str());
+    if (false) std::fprintf(stderr, "i4-head: text '%s'\n", t.text.c_str());
     if (const auto twin = std::exchange(m.swallow, {});
         twin.size() == 1 && t.text.size() == 1 && (t.text[0] | 0x20) == (twin[0] | 0x20))
         return {};
@@ -211,6 +217,11 @@ Cmd Head::update(Model& m, Tick t) {
     return {};
 }
 
+Cmd Head::update(Model& m, ClearNotice) {
+    m.notice.clear();
+    return {};
+}
+
 Cmd Head::update(Model&, mayag::CloseRequest) { return Cmd::quit(0); }
 
 Head::Sub Head::subscribe(const Model& m) {
@@ -230,6 +241,7 @@ mayag::Node Head::view(const Model& m) {
     hud.latency_ms = -1;  // a real link: the bar shows requests in flight instead
     auto frame = head::view(m.arranged, m.motion, hud, m.textures);
     if (m.launcher.open) frame.add_child(launcher_view(m.launcher, m.apps, m.screen));
+    if (!m.notice.empty()) frame.add_child(notice_view(m.notice, m.screen));
     return frame;
 }
 

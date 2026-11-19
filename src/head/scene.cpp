@@ -179,4 +179,15 @@ Node launcher_view(const Launcher& l, const std::vector<link::App>& apps, Size<s
         .build();
 }
 
+Node notice_view(const std::string& message, Size<space::Desktop> screen) {
+    constexpr float width_px = 560.0f;
+    const float x = std::max(8.0f, (static_cast<float>(screen.width) - width_px) / 2.0f);
+    const float y = std::max(bar_height + 8.0f, static_cast<float>(screen.height) - 72.0f);
+    return (h(text<"!"> | font(15) | bold | fg(crust) | pad(0, 8) | bg(peach) | radius(6),
+              text_owned(message) | font(13) | fg(text_c) | grow())
+            | gap(12) | align(Align::center) | pad(10, 12) | absolute(x, y) | width(width_px)
+            | bg(mantle) | border(1, peach) | radius(10) | shadow(28, crust.fade(0.8f), {0.0f, 8.0f}))
+        .build();
+}
+
 }  // namespace i4::head

@@ -143,9 +143,14 @@ struct Apps {
     std::vector<App> apps;
     friend bool operator==(const Apps&, const Apps&) = default;
 };
+/// Something the person at the head should know, said once (shown briefly).
+struct Notice {
+    std::string text;
+    friend bool operator==(const Notice&, const Notice&) = default;
+};
 }  // namespace down
 
-using Down = std::variant<down::Welcome, down::Refused, down::Applied, down::Content, down::Apps>;
+using Down = std::variant<down::Welcome, down::Refused, down::Applied, down::Content, down::Apps, down::Notice>;
 
 // -- the protocol's identity --------------------------------------------------------
 //

@@ -3,41 +3,17 @@
 //   i4d [--socket wayland-i4] [--link PATH] [--output WxH] [--layout us]
 //
 // Until heads report their outputs, the session's one output is given here.
+// Everything the session launches runs with WAYLAND_DISPLAY=<socket> and no
+// DISPLAY (see Host::handle(fx::Spawn)).
 
 #include <jaal/jaal.hpp>
 
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
-#include <vector>
-
-#include <spawn.h>
 
 #include "../server/host.hpp"
 #include "../server/session.hpp"
-
-extern char** environ;
-
-namespace {
-
-/// `exec`, as i3 runs it: sh -c, with WAYLAND_DISPLAY pointing at us.
-void spawn(const std::string& command, const std::string& display) {
-    std::string own = "WAYLAND_DISPLAY=" + display;
-    std::vector<char*> env;
-    for (char** e = environ; *e != nullptr; ++e)
-        if (std::strncmp(*e, "WAYLAND_DISPLAY=", 16) != 0) env.push_back(*e);
-    env.push_back(own.data());
-    env.push_back(nullptr);
-    std::string sh = "sh", c = "-c", cmd = command;
-    char* argv[] = {sh.data(), c.data(), cmd.data(), nullptr};
-    pid_t pid = 0;
-    if (::posix_spawnp(&pid, "sh", nullptr, nullptr, argv, env.data()) != 0)
-        std::fprintf(stderr, "i4d: cannot run: %s\n", command.c_str());
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
     using namespace i4;
@@ -55,7 +31,6 @@ int main(int argc, char** argv) {
         else if (a == "--layout") layout = argv[++i];
         else if (a == "--output") std::sscanf(argv[++i], "%dx%d", &width, &height);
     }
-    std::signal(SIGCHLD, SIG_IGN);  // children reap themselves
 
     auto listener = transport::Channel::listen(link);
     if (!listener) {
@@ -64,7 +39,7 @@ int main(int argc, char** argv) {
     }
     server::Host host({.keyboard_layout = layout,
                        .output = wm::OutputInfo{"i4-0", {0, 0, width, height}},
-                       .spawn = [socket](const std::string& c) { spawn(c, socket); }},
+                       .wayland_display = socket},
                       std::move(*listener));
     if (!host.display().add_socket(socket)) {
         std::fprintf(stderr, "i4d: cannot listen on %s\n", socket.c_str());
