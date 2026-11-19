@@ -66,7 +66,7 @@ if [ -n "$port" ]; then
     i=0; until [ -s $keyfile ] && grep -q "pairing key" $out/i4d.log 2>/dev/null || [ $i -ge 50 ]; do sleep 0.05; i=$((i + 1)); done
 fi
 
-start head env $envs I4_HEAD_TRACE=1 timeout $((secs + 1)) $bin/i4-head --link $headlink $keyopt
+start head env I4_VSYNC=${I4_VSYNC:-0} ${I4_SW_DECODE:+I4_SW_DECODE=1} ${I4_FULLSCREEN:+I4_FULLSCREEN=1} $envs I4_HEAD_TRACE=1 timeout $((secs + 1)) $bin/i4-head --link $headlink $keyopt
 i=0; until grep -q 'GPU ready' $out/head.log 2>/dev/null || [ $i -ge 60 ]; do sleep 0.05; i=$((i + 1)); done
 
 [ $# -gt 0 ] && start client env WAYLAND_DISPLAY=$sock I4_LINK=$link timeout $secs "$@"

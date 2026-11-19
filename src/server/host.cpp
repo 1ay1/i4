@@ -298,6 +298,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
     const auto t0 = std::chrono::steady_clock::now();
     std::optional<link::down::Encoded> enc;
     std::optional<link::down::Video> video;
+    bool nothing_changed = false;
     link::down::Content c{window, gen, {}, link::down::ShmLayout{}};
     match(
         b->second,
@@ -311,12 +312,45 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
         },
         [&](const DmabufBuffer& buf) {
             if (h.video && encoder_.available()) {
-                // On the GPU, start to finish: no CPU ever reads it.
+                // On the GPU, start to finish: no CPU ever reads the frame.
                 DmabufFrame f{buf.id, buf.width, buf.height, buf.fourcc, buf.modifier, {}};
                 for (const auto& p : buf.planes) f.planes.push_back({p.fd->get(), p.offset, p.stride});
                 auto& stream = h.streams[window];
                 if (!stream) stream = encoder_.stream();
                 c.size = {buf.width, buf.height};
+                // Which tiles really changed: compared on the GPU against the
+                // last frame this head got (clients often damage everything).
+                const auto flags = encoder_.changes(*stream, f);
+                if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr) {
+                    std::size_t n = 0;
+                    if (flags) for (auto x : *flags) n += x;
+                    std::fprintf(stderr, "i4d: gpu diff %s %zu of %zu tiles\n", flags ? "ok" : "none", n,
+                                 flags ? flags->size() : 0);
+                }
+                if (flags) {
+                    std::vector<std::array<std::int32_t, 4>> changed;
+                    const int cols = (buf.width + 63) / 64;
+                    for (std::size_t i = 0; i < flags->size(); ++i)
+                        if ((*flags)[i])
+                            changed.push_back({static_cast<std::int32_t>(i % cols) * 64,
+                                               static_cast<std::int32_t>(i / cols) * 64, 64, 64});
+                    // Few tiles (typing, a cursor blink, a hover): just those,
+                    // read off the GPU, lossless; the head pastes a few KB and
+                    // decodes nothing.
+                    const auto r = remote::runs(buf.width, buf.height, changed);
+                    if (r.tiles.empty()) {
+                        nothing_changed = true;
+                        return;
+                    }
+                    const auto total = static_cast<std::uint64_t>(buf.width) * static_cast<std::uint64_t>(buf.height);
+                    if (r.area * 4 < total) {
+                        constexpr std::uint32_t ar24 = 0x34325241, ab24 = 0x34324241;
+                        if (auto px = encoder_.read(f, r.rects))
+                            enc = remote::pack(r, *px, buf.fourcc == ar24 || buf.fourcc == ab24);
+                        if (enc) return;
+                    }
+                }
+                // Most of it changed (or a first frame): video, on NVENC.
                 video = encoder_.encode(*stream, f);
                 return;
             }
@@ -355,8 +389,10 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
         return;
     }
     if (!enc) {
-        // Could not be read or encoded: the head keeps its last frame, but
-        // the client must never wait on a frame that will not be shown.
+        // Could not be read or encoded (or the client damaged nothing): the
+        // head keeps its last frame, but the client must never wait on a
+        // frame that will not be shown.
+        (void)nothing_changed;
         emit(ev::HeadSaid{id, link::up::Released{window, gen}});
         emit(ev::HeadSaid{id, link::up::Shown{window, gen}});
         return;

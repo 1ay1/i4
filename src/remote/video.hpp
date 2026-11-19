@@ -10,6 +10,7 @@
 // uploads as it is. (Next: hand the hardware surface to the renderer
 // directly, without the trip through CPU memory.)
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -24,6 +25,17 @@ struct Picture {
     std::int32_t width = 0, height = 0;
     std::vector<std::uint8_t> rgba;
 };
+
+/// What changed between two same-size RGBA pictures, as rectangles (64 px
+/// tiles merged along rows), with their pixels packed rect after rect. A
+/// head uploads only these: a keystroke on a 4K window is a few KB, not
+/// 40 MB across PCIe. Empty `rects` with `whole`: nothing changed.
+struct Changes {
+    std::vector<std::array<int, 4>> rects;
+    std::vector<std::uint8_t> packed;
+    bool whole = false;  // a different size, or most of it changed: upload it all
+};
+[[nodiscard]] Changes diff(const Picture& before, const Picture& after);
 
 class Decoder {
 public:

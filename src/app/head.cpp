@@ -44,6 +44,15 @@ int main(int argc, char** argv) {
     const char* runtime = std::getenv("XDG_RUNTIME_DIR");
     std::string path = std::string(runtime ? runtime : "/tmp") + "/i4-link";
     std::string key_arg;
+    // Present each frame the moment it is drawn (no wait for vblank; the
+    // host compositor may tear it in): the lowest latency there is. On by
+    // default; --vsync or I4_VSYNC=1 for tear-free frames.
+    bool vsync = false;
+    // Fullscreen + no vsync: the host compositor scans the head's buffer out
+    // directly and may flip it mid-frame (Hyprland: an `immediate` window
+    // rule); its compositing pass and a whole refresh drop out of the path.
+    bool fullscreen = std::getenv("I4_FULLSCREEN") != nullptr;
+    if (const char* v = std::getenv("I4_VSYNC"); v && *v) vsync = *v != '0';
     head::options.terminal = find_terminal();
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
@@ -51,6 +60,9 @@ int main(int argc, char** argv) {
         else if (a == "--link" && i + 1 < argc) path = argv[++i];
         else if (a == "--key" && i + 1 < argc) key_arg = argv[++i];
         else if (a == "--terminal" && i + 1 < argc) head::options.terminal = argv[++i];
+        else if (a == "--vsync") vsync = true;
+        else if (a == "--fullscreen") fullscreen = true;
+        else if (a == "--immediate") vsync = false;
     }
 
     // Across a network the link is encrypted, with the session's pairing
@@ -81,12 +93,14 @@ int main(int argc, char** argv) {
     mayag::AppConfig cfg;
     cfg.title = "i4";
     cfg.size = {1280, 800};
+    cfg.vsync = vsync;
     auto opened = mayag::platform::Native::open(mayag::detail::window_config(cfg));
     if (!opened) {
         std::fprintf(stderr, "i4-head: could not open a window\n");
         return 1;
     }
     auto window = std::move(*opened);
+    if (fullscreen) window.set_fullscreen(true);
     if (cfg.fonts == nullptr) cfg.fonts = mayag::typo::system::default_stack();
 
     jaal::run_options opt;

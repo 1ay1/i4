@@ -127,6 +127,36 @@ TEST(straight_rgba_for_a_renderer) {
     CHECK(o[4] == 255 && o[5] == 255 && o[6] == 255 && o[7] == 128);
 }
 
+TEST(damaged_tiles_read_as_runs_pack_and_apply_exactly) {
+    Pool p{200, 130, 0, 0};
+    p.fill(11);
+    // Damage touching tiles (1,0) and (2,0) (one run) and (0,2).
+    const std::vector<std::array<std::int32_t, 4>> damage = {{70, 10, 70, 5}, {3, 129, 1, 1}};
+    const auto r = remote::runs(p.w, p.h, damage);
+    CHECK((r.tiles == std::vector<std::uint32_t>{1, 2, 8}));
+    CHECK(r.rects.size() == 2u);
+    // The runs' pixels, as a GPU readback would hand them over.
+    std::vector<std::byte> px;
+    for (const auto& run : r.rects)
+        for (int y = run[1]; y < run[1] + run[3]; ++y) px.insert(px.end(), p.px(run[0], y), p.px(run[0], y) + run[2] * 4);
+    const auto e = remote::pack(r, px, true);
+    CHECK(e.has_value());
+    // Applied onto a picture, it matches the source wherever it wrote.
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(p.w) * p.h * 4, 0);
+    std::vector<std::array<int, 4>> written;
+    CHECK(e && remote::apply_rgba(rgba, p.w, p.h, wire(*e), written));
+    CHECK(written.size() == 3u);
+    bool same = true;
+    for (const auto& w : written)
+        for (int y = w[1]; y < w[1] + w[3]; ++y)
+            for (int x = w[0]; x < w[0] + w[2]; ++x) {
+                const auto* s = reinterpret_cast<const std::uint8_t*>(p.px(x, y));
+                const auto* o = rgba.data() + (static_cast<std::size_t>(y) * p.w + x) * 4;
+                if (s[3] == 255 && (o[0] != s[2] || o[1] != s[1] || o[2] != s[0])) same = false;
+            }
+    CHECK(same);
+}
+
 TEST(a_terminal_keystroke_is_small) {
     // A mostly flat 1100x640 terminal; one glyph appears.
     Pool p{1100, 640, 0, 0};

@@ -17,6 +17,7 @@
 // Accepted but not yet composited (each is protocol i4::wl already speaks):
 // subsurface and popup content, clipboard, layer-shell, dmabuf.
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -113,6 +114,8 @@ struct Pending {
     std::optional<std::optional<id_t>> attach;
     std::vector<id_t> frames;
     std::optional<SyncPoint> acquire, release;
+    /// Rectangles (x, y, w, h) the client says changed.
+    std::vector<std::array<std::int32_t, 4>> damage;
 };
 
 /// What the surface IS, as of its last commit.

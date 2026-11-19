@@ -86,6 +86,9 @@ Cmd Head::update(Model& m, Heard h) {
         const auto tex = texture_of(c->window);
         if (h.texture != 0) {
             m.textures[c->window] = h.texture;
+        } else if (h.patch) {
+            m.textures[c->window] = tex;
+            out.push_back(mayag::PatchImage{tex, std::move(*h.patch)});
         } else if (h.pixels) {
             m.textures[c->window] = tex;
             out.push_back(mayag::upload(tex, std::move(*h.pixels)));

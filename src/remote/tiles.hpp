@@ -10,6 +10,7 @@
 // Pure byte-in/byte-out (no fds, no platform headers), so it builds for a
 // head on any OS and tests/test_tiles.cpp checks it exactly.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -47,5 +48,25 @@ struct Source {
 /// changed: what a renderer that takes RGBA uploads as it is.
 [[nodiscard]] bool apply(Canvas& canvas, std::int32_t width, std::int32_t height, const link::down::Encoded& e,
                          bool rgba = false);
+
+/// The tiles that `damage` (x, y, w, h rects) touches in a width x height
+/// frame: as runs along each row of tiles (one rect per run, to read in one
+/// go), the tile indices in Encoded order, and the area covered.
+struct Runs {
+    std::vector<std::array<int, 4>> rects;
+    std::vector<std::uint32_t> tiles;
+    std::uint64_t area = 0;
+};
+[[nodiscard]] Runs runs(std::int32_t width, std::int32_t height, const std::vector<std::array<std::int32_t, 4>>& damage,
+                        std::uint32_t tile = 64);
+/// An update of just those tiles, from the runs' pixels (32-bit ARGB words,
+/// packed run after run, rows tight): no shadow, no diff, no full frame.
+[[nodiscard]] std::optional<link::down::Encoded> pack(const Runs& r, std::span<const std::byte> pixels, bool alpha,
+                                                      std::uint32_t tile = 64, int level = 1);
+
+/// Like apply(), onto a straight-RGBA picture (width * height * 4 bytes),
+/// returning the rectangles written: what a renderer must re-upload.
+[[nodiscard]] bool apply_rgba(std::vector<std::uint8_t>& rgba, std::int32_t width, std::int32_t height,
+                              const link::down::Encoded& e, std::vector<std::array<int, 4>>& written);
 
 }  // namespace i4::remote

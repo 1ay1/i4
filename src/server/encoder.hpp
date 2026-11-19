@@ -15,6 +15,7 @@
 // Everything is loaded at run time (EGL, GLES, libcuda through FFmpeg); on
 // a machine without NVENC, available() is false and remote heads get tiles.
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -59,8 +60,19 @@ public:
     [[nodiscard]] StreamPtr stream();
     /// One frame of `s`; nullopt if it could not be imported or encoded.
     [[nodiscard]] std::optional<link::down::Video> encode(Stream& s, const DmabufFrame& f, bool keyframe = false);
+    /// Which 64 px tiles of `f` differ from what `s` last saw (one byte per
+    /// tile, row-major; computed on the GPU, a few hundred bytes read back),
+    /// and remember `f` for next time. nullopt: no earlier frame of this
+    /// size, so everything changed.
+    [[nodiscard]] std::optional<std::vector<std::uint8_t>> changes(Stream& s, const DmabufFrame& f);
     /// The client destroyed this buffer: drop its import.
     void forget(std::uint64_t buffer);
+    /// Read just these rectangles (x, y, w, h) of the frame back from the
+    /// GPU, as 32-bit little-endian ARGB words (B,G,R,A bytes), packed rect
+    /// after rect. For small damage: a few KB across PCIe, no encode, no
+    /// decode, lossless. nullopt: could not import or read.
+    [[nodiscard]] std::optional<std::vector<std::byte>> read(const DmabufFrame& f,
+                                                            const std::vector<std::array<int, 4>>& rects);
 
 private:
     struct Impl;

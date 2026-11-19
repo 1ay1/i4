@@ -48,6 +48,9 @@ struct Heard {
     /// The dmabuf is on the GPU as this texture (imported once per client
     /// buffer, then rebound): nothing to upload. 0 = not imported.
     std::uint32_t texture = 0;
+    /// Remote frames: only what changed since the last one, uploaded in
+    /// place (the whole picture rides along for when that cannot happen).
+    std::optional<jaal::shared<mayag::PatchData>> patch = std::nullopt;
 };
 /// The GPU has finished sampling frames up to `generation` of `window`.
 struct GpuDone {
@@ -179,7 +182,7 @@ struct Head {
                              mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, ClearNotice,
                              mayag::CloseRequest, KeyInput, KeymapInput, RepeatInput, ModsInput, KeyboardLeft,
                              ScrollInput, mayag::ScrollEvent>;
-    using Cmd = mayag::Cmd<Msg, do_say, do_forget, do_cursor, mayag::upload_image, mayag::release_image,
+    using Cmd = mayag::Cmd<Msg, do_say, do_forget, do_cursor, mayag::upload_image, mayag::patch_image, mayag::release_image,
                            mayag::set_title>;
     using Sub = mayag::Sub<Msg>;
 

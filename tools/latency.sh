@@ -18,7 +18,7 @@ while [ $# -gt 0 ]; do
 done
 root=$(cd "$(dirname "$0")/.." && pwd)
 export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t /run/user/$(id -u)/hypr/ | head -1)
-secs=$((n / 5 + 10))
+secs=$((n / 8 + 6))
 r=""; [ -n "$port" ] && r="-r $port"
 setsid "$root/tools/live.sh" -b release -s $secs $r -- kitty -o cursor_blink_interval=0 sh -c cat \
     </dev/null >/tmp/i4-live-latency.log 2>&1 &
@@ -36,3 +36,5 @@ grep 'key->photon [0-9]' /tmp/i4-live/head.log | awk '{print $3}' | sort -n |
     awk -v how="${port:+tcp}" '{a[NR]=$1} END{if (NR==0) {print "no samples"; exit}
         printf "%s key->photon  n=%d  min %.1f  p50 %.1f  p90 %.1f  max %.1f ms\n", (how==""?"local":how), NR, a[1], a[int(NR*0.5)+1], a[int(NR*0.9)+1], a[NR]}'
 grep 'remote frame' /tmp/i4-live/head.log | awk '{s+=$(NF-3); t+=$(NF-1); n++} END{if (n) printf "remote frames: %d, mean %.0f bytes, decode %.2f ms\n", n, s/n, t/n}'
+# Leave nothing behind: the next run starts on a quiet machine.
+i=0; while pgrep -u "$(id -u)" -f 'i4d --socket wayland-i4live' >/dev/null && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done

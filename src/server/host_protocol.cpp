@@ -192,9 +192,14 @@ void Host::bind_compositor(srv::Client& client, std::uint32_t version, id_t id) 
             destroyed(*it->second);
             surfaces_.erase(it);
         });
-        // Accepted; i4 composites whole buffers at scale 1 for now.
-        sl->on<wl_surface::requests::damage>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
-        sl->on<wl_surface::requests::damage_buffer>([](std::int32_t, std::int32_t, std::int32_t, std::int32_t) {});
+        // Damage: what changed since the last commit (scale 1: surface and
+        // buffer coordinates agree). It decides what a head across a
+        // network is sent: a typed character is a few tiles, not a frame.
+        const auto damaged = [this, &client, sid](std::int32_t dx, std::int32_t dy, std::int32_t dw, std::int32_t dh) {
+            if (auto* x = surface(&client, sid)) x->pending.damage.push_back({dx, dy, dw, dh});
+        };
+        sl->on<wl_surface::requests::damage>(damaged);
+        sl->on<wl_surface::requests::damage_buffer>(damaged);
         sl->on<wl_surface::requests::set_opaque_region>([](Ref<wl_region>) {});
         sl->on<wl_surface::requests::set_input_region>([](Ref<wl_region>) {});
         sl->on<wl_surface::requests::set_buffer_scale>([](std::int32_t) {});
@@ -237,6 +242,7 @@ void Host::committed(Surface& s) {
     const auto acquire = s.pending.attach && *s.pending.attach ? s.pending.acquire : std::nullopt;
     const auto release = s.pending.attach && *s.pending.attach ? s.pending.release : std::nullopt;
     const bool attached = s.pending.attach.has_value();
+    auto damage = std::move(s.pending.damage);
     const auto frames = commit(s.current, s.pending);
     const auto n = ++s.commits;
 
@@ -258,6 +264,7 @@ void Host::committed(Surface& s) {
         windows_[w] = {s.client, s.id};
         emit(ev::Mapped{w, t.info});
     }
+    (void)damage;  // recorded, not yet used: remote heads diff on the GPU (clients often damage everything)
 
     if (acquire) {
         // Explicit sync: the GPU may still be drawing it. It becomes the

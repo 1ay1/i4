@@ -105,6 +105,53 @@ void main() {
     color = vec4(v, 0.0, 0.0, 1.0);
 })";
 
+// A straight copy, swizzled to the bytes Wayland's ARGB8888 has in memory
+// (B, G, R, A), so glReadPixels(GL_RGBA) hands back exactly that.
+constexpr const char* kCopy = R"(#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+uniform samplerExternalOES src;
+uniform vec2 size;
+out vec4 color;
+void main() { color = texture(src, gl_FragCoord.xy / size).bgra; }
+)";
+
+// One fragment per tile: does any pixel of it differ from the previous
+// frame? The whole comparison stays on the GPU.
+constexpr const char* kDiff = R"(#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+precision highp int;
+uniform samplerExternalOES src;
+uniform sampler2D prev;
+uniform ivec2 size;
+uniform int tile;
+out vec4 color;
+void main() {
+    ivec2 o = ivec2(gl_FragCoord.xy) * tile;
+    ivec2 e = min(o + tile, size);
+    vec2 inv = 1.0 / vec2(size);
+    for (int y = o.y; y < e.y; ++y)
+        for (int x = o.x; x < e.x; ++x)
+            if (any(greaterThan(abs(texture(src, (vec2(x, y) + 0.5) * inv) - texelFetch(prev, ivec2(x, y), 0)),
+                                vec4(0.5 / 255.0)))) {
+                color = vec4(1.0);
+                return;
+            }
+    color = vec4(0.0);
+}
+)";
+
+// The frame as it is, to compare the next one against.
+constexpr const char* kKeep = R"(#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+uniform samplerExternalOES src;
+uniform vec2 size;
+out vec4 color;
+void main() { color = texture(src, gl_FragCoord.xy / size); }
+)";
+
 }  // namespace
 
 // -- a stream: one NVENC session ------------------------------------------------------
@@ -116,7 +163,12 @@ public:
         av_buffer_unref(&frames);
         av_frame_free(&frame);
         av_packet_free(&pkt);
+        if (prev != 0) glDeleteTextures(1, &prev);
+        if (prev_fbo != 0) glDeleteFramebuffers(1, &prev_fbo);
     }
+    /// The last frame seen (RGBA8), for the GPU tile diff.
+    GLuint prev = 0, prev_fbo = 0;
+    std::int32_t prev_w = 0, prev_h = 0;
     AVCodecContext* ctx = nullptr;
     AVBufferRef* frames = nullptr;
     AVFrame* frame = av_frame_alloc();
@@ -140,6 +192,12 @@ struct Encoder::Impl {
     PFNEGLQUERYDMABUFMODIFIERSEXTPROC QueryModifiers = nullptr;
     GLuint program = 0, fbo = 0, vao = 0;
     GLint u_size = -1;
+    GLuint copy_program = 0, copy_fbo = 0, copy_tex = 0;
+    GLint u_copy_size = -1;
+    std::int32_t cw = 0, ch = 0;
+    GLuint diff_program = 0, keep_program = 0, flags_fbo = 0, flags_tex = 0;
+    GLint u_diff_size = -1, u_diff_tile = -1, u_keep_size = -1;
+    std::int32_t fw = 0, fh = 0;
 
     /// The planes texture (W x 3H, R8), registered with CUDA, by size.
     GLuint planes = 0;
@@ -235,6 +293,37 @@ struct Encoder::Impl {
         u_size = glGetUniformLocation(program, "size");
         glGenFramebuffers(1, &fbo);
         glGenVertexArrays(1, &vao);
+        copy_program = glCreateProgram();
+        glAttachShader(copy_program, shader(GL_VERTEX_SHADER, kVertex));
+        glAttachShader(copy_program, shader(GL_FRAGMENT_SHADER, kCopy));
+        glLinkProgram(copy_program);
+        glGetProgramiv(copy_program, GL_LINK_STATUS, &linked);
+        if (!linked) return fail("readback shader did not link");
+        glUseProgram(copy_program);
+        glUniform1i(glGetUniformLocation(copy_program, "src"), 0);
+        u_copy_size = glGetUniformLocation(copy_program, "size");
+        glGenFramebuffers(1, &copy_fbo);
+        auto link_program = [&](const char* frag) -> GLuint {
+            const GLuint p = glCreateProgram();
+            glAttachShader(p, shader(GL_VERTEX_SHADER, kVertex));
+            glAttachShader(p, shader(GL_FRAGMENT_SHADER, frag));
+            glLinkProgram(p);
+            GLint good = 0;
+            glGetProgramiv(p, GL_LINK_STATUS, &good);
+            return good ? p : 0;
+        };
+        diff_program = link_program(kDiff);
+        keep_program = link_program(kKeep);
+        if (diff_program == 0 || keep_program == 0) return fail("diff shaders did not link");
+        glUseProgram(diff_program);
+        glUniform1i(glGetUniformLocation(diff_program, "src"), 0);
+        glUniform1i(glGetUniformLocation(diff_program, "prev"), 1);
+        u_diff_size = glGetUniformLocation(diff_program, "size");
+        u_diff_tile = glGetUniformLocation(diff_program, "tile");
+        glUseProgram(keep_program);
+        glUniform1i(glGetUniformLocation(keep_program, "src"), 0);
+        u_keep_size = glGetUniformLocation(keep_program, "size");
+        glGenFramebuffers(1, &flags_fbo);
         return true;
     }
 
@@ -418,6 +507,110 @@ struct Encoder::Impl {
         return out;
     }
 
+    std::optional<std::vector<std::byte>> read(const DmabufFrame& f, const std::vector<std::array<int, 4>>& rects) {
+        if (!ok || f.width <= 0 || f.height <= 0) return std::nullopt;
+        eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, egl);
+        const GLuint src = import(f);
+        if (src == 0) return std::nullopt;
+        if (cw != f.width || ch != f.height) {
+            if (copy_tex != 0) glDeleteTextures(1, &copy_tex);
+            glGenTextures(1, &copy_tex);
+            glBindTexture(GL_TEXTURE_2D, copy_tex);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, f.width, f.height);
+            glBindFramebuffer(GL_FRAMEBUFFER, copy_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, copy_tex, 0);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return std::nullopt;
+            cw = f.width;
+            ch = f.height;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, copy_fbo);
+        glViewport(0, 0, f.width, f.height);
+        glUseProgram(copy_program);
+        glUniform2f(u_copy_size, static_cast<float>(f.width), static_cast<float>(f.height));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, src);
+        glBindVertexArray(vao);
+        // Only the damaged rectangles are drawn, then read.
+        glEnable(GL_SCISSOR_TEST);
+        for (const auto& r : rects) {
+            glScissor(r[0], r[1], r[2], r[3]);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        glDisable(GL_SCISSOR_TEST);
+        std::size_t total = 0;
+        for (const auto& r : rects) total += static_cast<std::size_t>(r[2]) * static_cast<std::size_t>(r[3]) * 4;
+        std::vector<std::byte> out(total);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        std::size_t at = 0;
+        for (const auto& r : rects) {
+            glReadPixels(r[0], r[1], r[2], r[3], GL_RGBA, GL_UNSIGNED_BYTE, out.data() + at);
+            at += static_cast<std::size_t>(r[2]) * static_cast<std::size_t>(r[3]) * 4;
+        }
+        if (glGetError() != GL_NO_ERROR) return std::nullopt;
+        return out;
+    }
+
+    std::optional<std::vector<std::uint8_t>> changes(Stream& s, const DmabufFrame& f) {
+        constexpr int T = 64;
+        if (!ok || f.width <= 0 || f.height <= 0) return std::nullopt;
+        eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, egl);
+        const GLuint src = import(f);
+        if (src == 0) return std::nullopt;
+        const int cols = (f.width + T - 1) / T, rows = (f.height + T - 1) / T;
+        std::optional<std::vector<std::uint8_t>> out;
+        glBindVertexArray(vao);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, src);
+        if (s.prev != 0 && s.prev_w == f.width && s.prev_h == f.height) {
+            if (fw != cols || fh != rows) {
+                if (flags_tex != 0) glDeleteTextures(1, &flags_tex);
+                glGenTextures(1, &flags_tex);
+                glBindTexture(GL_TEXTURE_2D, flags_tex);
+                glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, cols, rows);
+                glBindFramebuffer(GL_FRAMEBUFFER, flags_fbo);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, flags_tex, 0);
+                fw = cols;
+                fh = rows;
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, flags_fbo);
+            glViewport(0, 0, cols, rows);
+            glUseProgram(diff_program);
+            glUniform2i(u_diff_size, f.width, f.height);
+            glUniform1i(u_diff_tile, T);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, s.prev);
+            glActiveTexture(GL_TEXTURE0);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            std::vector<std::uint8_t> rgba(static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows) * 4);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, cols, rows, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+            std::vector<std::uint8_t> flags(static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows));
+            for (std::size_t i = 0; i < flags.size(); ++i) flags[i] = rgba[i * 4] != 0;
+            out = std::move(flags);
+        }
+        // Remember this frame for the next comparison.
+        if (s.prev == 0 || s.prev_w != f.width || s.prev_h != f.height) {
+            if (s.prev != 0) glDeleteTextures(1, &s.prev);
+            if (s.prev_fbo == 0) glGenFramebuffers(1, &s.prev_fbo);
+            glGenTextures(1, &s.prev);
+            glBindTexture(GL_TEXTURE_2D, s.prev);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, f.width, f.height);
+            glBindFramebuffer(GL_FRAMEBUFFER, s.prev_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s.prev, 0);
+            s.prev_w = f.width;
+            s.prev_h = f.height;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, s.prev_fbo);
+        glViewport(0, 0, f.width, f.height);
+        glUseProgram(keep_program);
+        glUniform2f(u_keep_size, static_cast<float>(f.width), static_cast<float>(f.height));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, src);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFlush();
+        return out;
+    }
+
     std::vector<link::up::Format> formats() const {
         std::vector<link::up::Format> out;
         if (!ok || QueryFormats == nullptr || QueryModifiers == nullptr) return out;
@@ -451,6 +644,10 @@ Encoder::StreamPtr Encoder::stream() { return StreamPtr{new Stream}; }
 void Encoder::StreamFree::operator()(Stream* s) const { delete s; }
 std::optional<link::down::Video> Encoder::encode(Stream& s, const DmabufFrame& f, bool keyframe) {
     return p_->encode(s, f, keyframe);
+}
+std::optional<std::vector<std::uint8_t>> Encoder::changes(Stream& s, const DmabufFrame& f) { return p_->changes(s, f); }
+std::optional<std::vector<std::byte>> Encoder::read(const DmabufFrame& f, const std::vector<std::array<int, 4>>& rects) {
+    return p_->read(f, rects);
 }
 void Encoder::forget(std::uint64_t buffer) {
     if (!p_->ok) return;

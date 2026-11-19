@@ -99,29 +99,67 @@ public:
                 if (!dec) dec = std::make_unique<remote::Decoder>();
                 const auto& v = std::get<link::down::Video>(c->layout);
                 if (auto pic = dec->decode(v, c->size.width, c->size.height)) {
-                    mayag::ImageData img;
-                    img.width = pic->width;
-                    img.height = pic->height;
-                    img.rgba = std::move(pic->rgba);
-                    h.pixels = jaal::shared<mayag::ImageData>::make(std::move(img));
+                    // Only what changed goes to the GPU; the whole picture
+                    // rides along for the first frame or a resize.
+                    auto& last = pictures_[c->window];
+                    const auto td = std::chrono::steady_clock::now();
+                    auto changes = remote::diff(last, *pic);
+                    if (trace_)
+                        std::fprintf(stderr, "i4-head: stage convert %.3f ms  diff %.3f ms  %zu rects %zu bytes\n",
+                                     std::chrono::duration<double, std::milli>(td - t0).count(),
+                                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - td).count(),
+                                     changes.rects.size(), changes.packed.size());
+                    mayag::PatchData pd;
+                    pd.width = pic->width;
+                    pd.height = pic->height;
+                    pd.rects = std::move(changes.rects);
+                    pd.pixels = std::move(changes.packed);
+                    if (changes.whole) {
+                        mayag::ImageData img;
+                        img.width = pic->width;
+                        img.height = pic->height;
+                        img.rgba = pic->rgba;
+                        pd.whole = jaal::shared<mayag::ImageData>::make(std::move(img));
+                        pd.rects.clear();
+                    }
+                    last = std::move(*pic);
+                    h.patch = jaal::shared<mayag::PatchData>::make(std::move(pd));
                 }
                 if (trace_)
                     std::fprintf(stderr, "i4-head: video frame %dx%d  %s %zu bytes  %s  %.3f ms\n", c->size.width,
                                  c->size.height, v.keyframe ? "key" : "delta", v.data.size(), dec->name().c_str(),
                                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
             } else if (c && std::holds_alternative<link::down::Encoded>(c->layout)) {
-                // Across a network: changed tiles onto this window's canvas,
-                // converted to RGBA as they land; the canvas is the image.
+                // Across a network: changed tiles onto this window's picture
+                // (the head's copy of what its texture holds, shared with the
+                // video path), and only those tiles re-uploaded.
                 const auto t0 = std::chrono::steady_clock::now();
-                auto& canvas = canvases_[c->window];
+                auto& pic = pictures_[c->window];
                 const auto& e = std::get<link::down::Encoded>(c->layout);
-                if (remote::apply(canvas, c->size.width, c->size.height, e, true)) {
-                    mayag::ImageData img;
-                    img.width = canvas.width;
-                    img.height = canvas.height;
-                    img.rgba.assign(reinterpret_cast<const std::uint8_t*>(canvas.pixels.data()),
-                                    reinterpret_cast<const std::uint8_t*>(canvas.pixels.data()) + canvas.pixels.size());
-                    h.pixels = jaal::shared<mayag::ImageData>::make(std::move(img));
+                std::vector<std::array<int, 4>> written;
+                if (remote::apply_rgba(pic.rgba, c->size.width, c->size.height, e, written)) {
+                    pic.width = c->size.width;
+                    pic.height = c->size.height;
+                    mayag::PatchData pd;
+                    pd.width = pic.width;
+                    pd.height = pic.height;
+                    if (e.keyframe) {
+                        mayag::ImageData img;
+                        img.width = pic.width;
+                        img.height = pic.height;
+                        img.rgba = pic.rgba;
+                        pd.whole = jaal::shared<mayag::ImageData>::make(std::move(img));
+                    } else {
+                        const auto pitch = static_cast<std::size_t>(pic.width) * 4;
+                        for (const auto& wr : written)
+                            for (int y = wr[1]; y < wr[1] + wr[3]; ++y) {
+                                const auto* row = pic.rgba.data() + static_cast<std::size_t>(y) * pitch +
+                                                  static_cast<std::size_t>(wr[0]) * 4;
+                                pd.pixels.insert(pd.pixels.end(), row, row + static_cast<std::size_t>(wr[2]) * 4);
+                            }
+                        pd.rects = std::move(written);
+                    }
+                    h.patch = jaal::shared<mayag::PatchData>::make(std::move(pd));
                 }
                 if (trace_)
                     std::fprintf(stderr, "i4-head: remote frame %dx%d  %zu tiles  %zu bytes  %.3f ms\n", c->size.width,
@@ -420,6 +458,7 @@ private:
     void forget(wm::WindowId w) {
         canvases_.erase(w);
         decoders_.erase(w);
+        pictures_.erase(w);
         auto it = windows_.find(w);
         if (it == windows_.end()) return;
         if constexpr (local_gpu)
@@ -458,6 +497,7 @@ private:
     std::map<wm::WindowId, WindowGpu> windows_;
     std::map<wm::WindowId, remote::Canvas> canvases_;  // remote frames, as they stand
     std::map<wm::WindowId, std::unique_ptr<remote::Decoder>> decoders_;  // remote video, per window
+    std::map<wm::WindowId, remote::Picture> pictures_;  // the last decoded picture, to diff against
     std::uint32_t next_texture_ = 0x2000'0000u;
     std::vector<GpuDone> gpu_done_;
     bool gpu_busy_ = false;
