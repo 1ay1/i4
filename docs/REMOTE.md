@@ -33,10 +33,9 @@ as compressed changed tiles (also lossless).
 ## On the Mac (the head)
 
 ```sh
-brew install cmake pkg-config ffmpeg zstd
-brew install libsodium
-git clone --recursive git@github.com:1ay1/i4.git && cd i4
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DI4_BUILD_TESTS=OFF   # builds the head only
+brew install gcc@16 cmake ninja pkg-config ffmpeg zstd libsodium   # Apple clang lacks C++26 pack bindings
+git clone --recursive https://github.com/1ay1/i4.git && cd i4
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-16 -DI4_BUILD_TESTS=OFF   # head only
 cmake --build build -j --target i4-head
 
 ./build/i4-head --link tcp:192.168.0.104:7400 --key fa64...2ed6   # the box's address, the printed key

@@ -184,7 +184,7 @@ public:
                     pd.height = pic->height;
                     pd.rects = std::move(changes.rects);
                     pd.pixels = std::move(changes.packed);
-                    if (changes.whole) {
+                    if (changes.whole || !patch_in_place) {
                         mayag::ImageData img;
                         img.width = pic->width;
                         img.height = pic->height;
@@ -213,7 +213,7 @@ public:
                     mayag::PatchData pd;
                     pd.width = pic.width;
                     pd.height = pic.height;
-                    if (e.keyframe) {
+                    if (e.keyframe || !patch_in_place) {
                         mayag::ImageData img;
                         img.width = pic.width;
                         img.height = pic.height;
@@ -352,6 +352,7 @@ public:
     [[nodiscard]] Window& window() { return window_; }
     /// For tests: does this platform take the local zero-copy path?
     static constexpr bool gpu_local_for_test() { return local_gpu; }
+    static constexpr bool patch_in_place_for_test() { return patch_in_place; }
 
     /// What this head's GPU can sample in place, for up::Caps.
     [[nodiscard]] std::vector<link::up::Format> importable() {
@@ -367,6 +368,12 @@ private:
     static constexpr std::uint64_t kUdp = (1u << 20) + 1;
     /// The platform imports client GPU buffers (Linux dmabuf): the local,
     /// zero-copy path. Elsewhere only remote frames (tiles, video) arrive.
+    /// The platform's window rewrites part of an image in place (mayag's
+    /// patch_image). Elsewhere every remote frame carries the whole picture.
+    static constexpr bool patch_in_place =
+        requires(Window& w, const std::vector<std::array<int, 4>>& r, const std::vector<std::uint8_t>& px) {
+            w.window().update_image_regions(1u, 1, 1, r, px);
+        };
     static constexpr bool local_gpu = requires(Window& w, mayag::Dmabuf d) {
         w.window().import_image(1u, d, 1, 1, {});
         w.window().poll_gpu_retired();
