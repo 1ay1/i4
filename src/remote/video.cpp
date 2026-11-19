@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -17,6 +19,36 @@ extern "C" {
 namespace i4::remote {
 
 bool video_available() { return true; }
+
+namespace {
+
+/// The platform's hardware decoder device, opened once (it is the slow part:
+/// ~100 ms to bring up CUDA / VideoToolbox) and shared by every window.
+struct HwDevice {
+    AVBufferRef* ref = nullptr;
+    AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
+};
+std::once_flag g_hw_once;
+HwDevice g_hw;
+
+const HwDevice& hw_device() {
+    std::call_once(g_hw_once, [] {
+        if (std::getenv("I4_SW_DECODE") != nullptr) return;
+        for (auto type : {AV_HWDEVICE_TYPE_VIDEOTOOLBOX, AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_CUDA,
+                          AV_HWDEVICE_TYPE_VAAPI})
+            if (av_hwdevice_ctx_create(&g_hw.ref, type, nullptr, nullptr, 0) >= 0) {
+                g_hw.type = type;
+                return;
+            }
+    });
+    return g_hw;
+}
+
+}  // namespace
+
+void warm_up() {
+    std::thread([] { (void)hw_device(); }).detach();
+}
 
 Changes diff(const Picture& a, const Picture& b) {
     Changes out;
@@ -99,22 +131,17 @@ struct Decoder::Impl {
         ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
         ctx->flags2 |= AV_CODEC_FLAG2_FAST;
         const char* kind = "software";
-        const bool sw_only = std::getenv("I4_SW_DECODE") != nullptr;
-        for (auto type : {AV_HWDEVICE_TYPE_VIDEOTOOLBOX, AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_CUDA,
-                          AV_HWDEVICE_TYPE_VAAPI}) {
-            if (sw_only) break;
-            for (int i = 0;; ++i) {
-                const AVCodecHWConfig* cfg = avcodec_get_hw_config(dec, i);
-                if (cfg == nullptr) break;
-                if (cfg->device_type != type || !(cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) continue;
-                if (av_hwdevice_ctx_create(&hw, type, nullptr, nullptr, 0) < 0) break;
-                hw_format = cfg->pix_fmt;
-                ctx->hw_device_ctx = av_buffer_ref(hw);
-                ctx->get_format = &Impl::pick;
-                kind = av_hwdevice_get_type_name(type);
-                break;
-            }
-            if (hw != nullptr) break;
+        const auto& dev = hw_device();
+        for (int i = 0; dev.ref != nullptr; ++i) {
+            const AVCodecHWConfig* cfg = avcodec_get_hw_config(dec, i);
+            if (cfg == nullptr) break;
+            if (cfg->device_type != dev.type || !(cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) continue;
+            hw = av_buffer_ref(dev.ref);
+            hw_format = cfg->pix_fmt;
+            ctx->hw_device_ctx = av_buffer_ref(hw);
+            ctx->get_format = &Impl::pick;
+            kind = av_hwdevice_get_type_name(dev.type);
+            break;
         }
         // Software: slices in parallel, never frames (frame threads delay
         // output by one frame per thread).

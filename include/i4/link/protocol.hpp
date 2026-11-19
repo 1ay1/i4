@@ -152,11 +152,17 @@ struct Caps {
     bool video = false;
     friend bool operator==(const Caps&, const Caps&) = default;
 };
+/// A frame sent by datagram (see remote/frames.hpp) was lost beyond repair:
+/// send `window` again, standing alone (a keyframe). Absent window: all.
+struct Refresh {
+    std::optional<wm::WindowId> window;
+    friend bool operator==(const Refresh&, const Refresh&) = default;
+};
 }  // namespace up
 
 using Input = std::variant<up::Key, up::Keyboard, up::Modifiers, up::Motion, up::Button, up::Scroll>;
 using Up = std::variant<up::Hello, up::Request, up::Key, up::Motion, up::Button, up::Shown, up::Released, up::Caps,
-                        up::Keyboard, up::Modifiers, up::Scroll>;
+                        up::Keyboard, up::Modifiers, up::Scroll, up::Refresh>;
 
 // -- server -> head ------------------------------------------------------------
 

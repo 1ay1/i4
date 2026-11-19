@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 
 #include "transport/channel.hpp"
+#include "transport/datagram.hpp"
 
 using namespace i4;
 using namespace i4::transport;
@@ -113,6 +114,23 @@ TEST(a_wrong_key_never_connects) {
     const auto k = key_of(7), wrong = key_of(8);
     auto p = connect_pair(&k, &wrong, 47413);
     CHECK(!p.ok);
+}
+
+TEST(datagrams_open_once_in_any_order_and_never_forged) {
+    const auto a = key_of(1), b = key_of(2);
+    DatagramSession tx{a, b}, rx{b, a};
+    CHECK(tx.token() == rx.token());
+    const auto d0 = tx.seal(bytes("zero")), d1 = tx.seal(bytes("one")), d2 = tx.seal(bytes("two"));
+    CHECK(rx.open(d2).has_value());  // reordered: fine
+    CHECK(rx.open(d0).has_value());
+    CHECK(!rx.open(d0).has_value());  // replayed: dropped
+    auto forged = d1;
+    forged.back() ^= std::byte{1};
+    CHECK(!rx.open(forged).has_value());
+    const auto got = rx.open(d1);
+    CHECK(got && *got == bytes("one"));
+    DatagramSession stranger{key_of(3), key_of(4)};
+    CHECK(!stranger.open(tx.seal(bytes("x"))).has_value());
 }
 
 TEST(a_tampered_packet_closes_the_link) {

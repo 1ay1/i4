@@ -57,7 +57,9 @@ Server::Reply Server::receive(const Up& u) {
         [&](const up::Scroll& s) -> Reply { return {.input = Input{s}}; },
         [&](const up::Shown& s) -> Reply { return {.shown = s}; },
         [&](const up::Released& r) -> Reply { return {.released = r}; },
-        [&](const up::Caps& c) -> Reply { return {.caps = c}; });
+        [&](const up::Caps& c) -> Reply { return {.caps = c}; },
+        // The host keeps the frame streams; it acts on this itself.
+        [&](const up::Refresh&) -> Reply { return {}; });
 }
 
 }  // namespace i4::link

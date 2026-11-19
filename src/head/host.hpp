@@ -28,6 +28,8 @@
 #include <sys/stat.h>
 
 #include "../transport/channel.hpp"
+#include "../transport/datagram.hpp"
+#include "../remote/frames.hpp"
 #include "../remote/tiles.hpp"
 #include "../remote/video.hpp"
 #include "head.hpp"
@@ -70,10 +72,27 @@ public:
         tap();
         window_.attach(narrow_);
         if (auto r = cx.watch(link_.fd(), jaal::interest::read, kLink)) reg_.emplace(std::move(*r));
+        if (udp_)
+            if (auto r = cx.watch(udp_->fd(), jaal::interest::read, kUdp)) udp_reg_.emplace(std::move(*r));
+        udp_hello();
+    }
+
+    /// Frames by datagram from a session across a network (the link must be
+    /// secure: the datagrams' keys come from its handshake).
+    void use_datagrams(transport::DatagramSocket s) {
+        auto keys = link_.datagram_keys();
+        if (!keys) return;
+        udp_session_.emplace(keys->first, keys->second);
+        udp_.emplace(std::move(s));
     }
 
     template <class Cx>
     void on_ready(Cx&, const jaal::readiness& r) {
+        if (r.token == kUdp) {
+            read_udp();
+            flush_gpu_done();
+            return;
+        }
         if (r.token != kLink) {
             window_.on_ready(narrow_, r);
             return;
@@ -86,11 +105,62 @@ public:
             reg_.reset();
             return;
         }
-        for (auto& p : *packets) {
+        for (auto& p : *packets) heard(p);
+        flush_gpu_done();
+    }
+
+    /// Frames by datagram: fragments in, whole frames out (parity rebuilds
+    /// most losses here); a frame lost beyond repair asks for a refresh.
+    void read_udp() {
+        if (!udp_) return;
+        for (auto& [d, from] : udp_->receive()) {
+            auto payload = udp_session_->open(d);
+            if (!payload) continue;
+            if (auto f = reassembly_.add(*payload)) {
+                transport::Packet p{std::move(f->bytes), {}};
+                heard(p);
+            }
+        }
+        auto lost = reassembly_.expire(1);
+        auto quiet = reassembly_.expire_quiet(std::chrono::steady_clock::now(), std::chrono::milliseconds(3));
+        lost.windows.insert(lost.windows.end(), quiet.windows.begin(), quiet.windows.end());
+        ask_refresh(lost);
+    }
+
+    void ask_refresh(const remote::Reassembly::Lost& lost) {
+        if (lost.unknown > 0)
+            (void)link_.send(link::encode(link::Up{link::up::Refresh{std::nullopt}}));
+        else
+            for (auto w : lost.windows)
+                (void)link_.send(link::encode(link::Up{link::up::Refresh{wm::WindowId{w}}}));
+        if (trace_ && (lost.unknown > 0 || !lost.windows.empty()))
+            std::fprintf(stderr, "i4-head: frames lost beyond repair (%zu windows, %zu unknown): refresh asked\n",
+                         lost.windows.size(), lost.unknown);
+    }
+
+    /// Say hello on UDP (the session learns where frames go) and keep the
+    /// NAT binding open: at once, then every second.
+    void udp_hello() {
+        if (!udp_) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (last_hello_ && now - *last_hello_ < std::chrono::seconds(1)) return;
+        last_hello_ = now;
+        (void)udp_->send(udp_session_->seal({}));
+    }
+
+    void heard(transport::Packet& p) {
+        {
             auto d = link::decode<link::Down>(p.bytes);
-            if (!d) continue;
+            if (!d) return;
             Heard h{std::move(*d), std::nullopt, 0};
             const auto* c = std::get_if<link::down::Content>(&h.message);
+            // Datagrams may arrive late: an older frame of a window never
+            // replaces a newer one.
+            if (c) {
+                auto& g = generation_[c->window];
+                if (c->generation < g) return;
+                g = c->generation;
+            }
             if (c && std::holds_alternative<link::down::Video>(c->layout)) {
                 // Across a network, encoded on the session's GPU: decoded here
                 // by this platform's hardware decoder.
@@ -188,7 +258,6 @@ public:
             }
             emit_(std::move(h));
         }
-        flush_gpu_done();
     }
 
     template <class K>
@@ -212,6 +281,9 @@ public:
             emit_(GpuReady{});
         }
         const bool want = link_.wants_write();
+        udp_hello();
+        if (reassembly_.pending())
+            ask_refresh(reassembly_.expire_quiet(std::chrono::steady_clock::now(), std::chrono::milliseconds(3)));
         if (reg_ && want != writing_ && reg_->modify(want ? jaal::interest::read_write : jaal::interest::read))
             writing_ = want;
     }
@@ -220,7 +292,7 @@ public:
     /// again shortly: a fence check is all it costs.
     [[nodiscard]] auto wait_hint() const noexcept {
         auto hint = window_.wait_hint();
-        if (gpu_busy_) {
+        if (gpu_busy_ || reassembly_.pending()) {
             constexpr std::chrono::nanoseconds soon{1'000'000};
             hint = hint ? std::min(*hint, soon) : soon;
         }
@@ -292,6 +364,7 @@ public:
 
 private:
     static constexpr std::uint64_t kLink = 1u << 20;
+    static constexpr std::uint64_t kUdp = (1u << 20) + 1;
     /// The platform imports client GPU buffers (Linux dmabuf): the local,
     /// zero-copy path. Elsewhere only remote frames (tiles, video) arrive.
     static constexpr bool local_gpu = requires(Window& w, mayag::Dmabuf d) {
@@ -473,6 +546,12 @@ private:
 
     Window window_;
     transport::Channel link_;
+    std::optional<transport::DatagramSocket> udp_;
+    std::optional<transport::DatagramSession> udp_session_;
+    std::optional<jaal::platform::native_reactor::registration> udp_reg_;
+    remote::Reassembly reassembly_;
+    std::optional<std::chrono::steady_clock::time_point> last_hello_;
+    std::map<wm::WindowId, std::uint64_t> generation_;  // newest frame shown, per window
     std::function<std::size_t(const mayag::window_events&)> widen_;
     std::function<void(int)> stop_;
     std::function<jaal::result<jaal::platform::native_reactor::registration>(int, jaal::interest, std::uint64_t)> watch_;

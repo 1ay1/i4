@@ -102,6 +102,8 @@ public:
     [[nodiscard]] bool remote() const { return stream_; }
     /// Encrypted and authenticated (the handshake is done).
     [[nodiscard]] bool secure() const;
+    /// Keys for this session's datagrams (send, receive), once secure.
+    [[nodiscard]] std::optional<std::pair<Key, Key>> datagram_keys() const;
     /// Bytes sent but not yet on the wire: queued here plus what the kernel
     /// still holds. A frame sender skips frames while this is large.
     [[nodiscard]] std::size_t unsent() const;

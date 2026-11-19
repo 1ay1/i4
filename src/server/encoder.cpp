@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <list>
+#include <utility>
 
 #include <dlfcn.h>
 
@@ -169,6 +170,9 @@ public:
     /// The last frame seen (RGBA8), for the GPU tile diff.
     GLuint prev = 0, prev_fbo = 0;
     std::int32_t prev_w = 0, prev_h = 0;
+    /// The head lost a frame: the next one is a keyframe and the diff starts over.
+    bool force_key = false;
+    bool forget_prev = false;
     AVCodecContext* ctx = nullptr;
     AVBufferRef* frames = nullptr;
     AVFrame* frame = av_frame_alloc();
@@ -492,6 +496,7 @@ struct Encoder::Impl {
         if (!copied) return std::nullopt;
 
         s.frame->pts = s.pts++;
+        keyframe = keyframe || std::exchange(s.force_key, false);
         s.frame->pict_type = keyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
         if (keyframe) s.frame->flags |= AV_FRAME_FLAG_KEY;
         else s.frame->flags &= ~AV_FRAME_FLAG_KEY;
@@ -561,7 +566,7 @@ struct Encoder::Impl {
         glBindVertexArray(vao);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, src);
-        if (s.prev != 0 && s.prev_w == f.width && s.prev_h == f.height) {
+        if (s.prev != 0 && s.prev_w == f.width && s.prev_h == f.height && !std::exchange(s.forget_prev, false)) {
             if (fw != cols || fh != rows) {
                 if (flags_tex != 0) glDeleteTextures(1, &flags_tex);
                 glGenTextures(1, &flags_tex);
@@ -648,6 +653,10 @@ std::optional<link::down::Video> Encoder::encode(Stream& s, const DmabufFrame& f
 std::optional<std::vector<std::uint8_t>> Encoder::changes(Stream& s, const DmabufFrame& f) { return p_->changes(s, f); }
 std::optional<std::vector<std::byte>> Encoder::read(const DmabufFrame& f, const std::vector<std::array<int, 4>>& rects) {
     return p_->read(f, rects);
+}
+void Encoder::refresh(Stream& s) {
+    s.force_key = true;
+    s.forget_prev = true;
 }
 void Encoder::forget(std::uint64_t buffer) {
     if (!p_->ok) return;

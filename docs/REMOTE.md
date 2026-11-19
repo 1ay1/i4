@@ -22,8 +22,8 @@ The first time, i4d creates the pairing key (`~/.config/i4/remote.key`, mode
        i4-head --link tcp:THIS-HOST:PORT --key fa64...2ed6
 ```
 
-Open TCP 7400 in the firewall if there is one (`sudo ufw allow 7400/tcp`).
-From outside your LAN, forward port 7400 on the router to this box.
+Open TCP and UDP 7400 in the firewall if there is one (`sudo ufw allow 7400`).
+From outside your LAN, forward port 7400 (TCP and UDP) on the router to this box.
 
 With an NVIDIA GPU, apps keep rendering on the GPU and every frame is
 encoded there (NVENC, HEVC 4:4:4, **lossless**, no reordering): the pixels
@@ -48,6 +48,18 @@ Or save the key once (`mkdir -p ~/.config/i4 && echo fa64...2ed6 >
 Video is decoded by VideoToolbox (the Mac's hardware decoder). `I4_HEAD_TRACE=1`
 prints each frame (codec, decoder, bytes, decode time) and key->photon
 latency.
+
+## Frames by datagram
+
+Input, the window manager and the cursor stay on the TCP link (reliable,
+ordered). Frames go by UDP on the same port, encrypted with keys from the
+same handshake: a lost packet never holds up the next frame. Each frame is
+fragmented with XOR parity (one loss per 8 fragments rebuilt on arrival;
+a keystroke-sized frame is sent three times), and a frame lost beyond
+repair makes the head ask for a refresh: that window's next frame is a
+keyframe. Open UDP 7400 too; `I4_TCP_ONLY=1` on the head keeps frames on
+TCP. Measured with 30% of datagrams dropped on purpose (`I4_UDP_DROP=0.3`
+on i4d): key->photon p50 4.8 ms, p90 5.2 ms.
 
 ## What it costs (measured, release build, kitty, 40 keys, head fullscreen)
 

@@ -59,7 +59,7 @@ if [ -n "$port" ]; then
     keyfile=$out/remote.key; rm -f $keyfile
     remote="--remote tcp::$port --key $keyfile"; headlink=tcp:$host:$port; keyopt="--key $keyfile"
 fi
-start i4d env I4D_TRACE=1 timeout $((secs + 2)) $bin/i4d --socket $sock --link $link $remote
+start i4d env I4D_TRACE=1 ${I4_UDP_DROP:+I4_UDP_DROP=$I4_UDP_DROP} timeout $((secs + 2)) $bin/i4d --socket $sock --link $link $remote
 i=0; until [ -S $link ] || [ $i -ge 50 ]; do sleep 0.05; i=$((i + 1)); done
 [ -S $link ] || { echo "live: i4d did not start"; cat $out/i4d.log; exit 1; }
 if [ -n "$port" ]; then

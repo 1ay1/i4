@@ -91,11 +91,11 @@ endif()
 # -- transport ------------------------------------------------------------------
 # Moving link messages between processes: a local SOCK_SEQPACKET channel with
 # fds riding alongside, or TCP (tcp:HOST:PORT) to a head on another machine.
-add_library(i4_transport STATIC src/transport/channel.cpp)
+add_library(i4_transport STATIC src/transport/channel.cpp src/transport/datagram.cpp)
 target_link_libraries(i4_transport PUBLIC i4::link jaal::jaal PRIVATE PkgConfig::SODIUM i4_warnings)
 
 # -- remote: frames as bytes, for a head across a network (portable) ---------------
-add_library(i4_remote STATIC src/remote/tiles.cpp src/remote/video.cpp)
+add_library(i4_remote STATIC src/remote/tiles.cpp src/remote/video.cpp src/remote/frames.cpp)
 target_include_directories(i4_remote PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(i4_remote PUBLIC i4::link PRIVATE PkgConfig::ZSTD PkgConfig::AV i4_warnings)
 

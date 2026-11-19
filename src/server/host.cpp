@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "../remote/frames.hpp"
 #include "i4/base/match.hpp"
 
 extern char** environ;
@@ -23,6 +24,7 @@ namespace {
 
 constexpr std::uint64_t kListener = 1;
 constexpr std::uint64_t kRemoteListener = 2;
+constexpr std::uint64_t kUdp = 3;
 constexpr std::uint64_t kHeadBase = 1u << 16;     // + head id
 constexpr std::uint64_t kLaunchBase = 1u << 20;   // + launch id
 constexpr std::uint64_t kWaylandBase = 1u << 24;  // + i4::wl's key
@@ -49,6 +51,10 @@ Host::Host(Options options, transport::Fd link_listener)
             remote_listener_ = std::move(*l);
         else
             std::fprintf(stderr, "i4d: cannot listen on %s\n", options_.remote.c_str());
+        if (auto u = transport::DatagramSocket::bind(options_.remote))
+            udp_.emplace(std::move(*u));
+        else
+            std::fprintf(stderr, "i4d: no UDP on %s: frames go over TCP\n", options_.remote.c_str());
     }
     display_.on_client_created([this](srv::Client& c) { greet(c); });
     publish_globals();
@@ -68,6 +74,8 @@ void Host::start() {
     if (remote_listener_)
         if (auto r = watch_(remote_listener_.get(), jaal::interest::read, kRemoteListener))
             remote_listener_reg_.emplace(std::move(*r));
+    if (udp_)
+        if (auto r = watch_(udp_->fd(), jaal::interest::read, kUdp)) udp_reg_.emplace(std::move(*r));
     // The output is the first thing the session hears, like any other event.
     emit(ev::OutputReady{options_.output});
 }
@@ -77,6 +85,7 @@ void Host::release() {
     wayland_.clear();
     listener_reg_.reset();
     remote_listener_reg_.reset();
+    udp_reg_.reset();
     // Launched apps outlive the session's loop (they are the user's), but
     // their exit watches do not.
     for (auto& [id, r] : launches_) r.exit.reset();
@@ -114,6 +123,8 @@ void Host::ready(const jaal::readiness& r) {
         accept_head(listener_, nullptr);
     } else if (r.token == kRemoteListener) {
         accept_head(remote_listener_, &options_.remote_key);
+    } else if (r.token == kUdp) {
+        read_udp();
     }
 }
 
@@ -142,7 +153,7 @@ void Host::accept_head(const transport::Fd& listener, const transport::Key* key)
     next_head_ = next_head_.next();
     if (ch->remote() && !ch->secure() && key == nullptr)
         std::fprintf(stderr, "i4d: head %u connected over the network (unencrypted)\n", id.value);
-    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}, false, {}};
+    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}, false, {}, std::nullopt, std::nullopt, 0, 0};
     if (auto r = watch_(h.channel.fd(), jaal::interest::read, kHeadBase + id.value)) h.reg.emplace(std::move(*r));
     heads_.emplace(id, std::move(h));
     emit(ev::HeadJoined{id});
@@ -165,8 +176,26 @@ void Host::read_head(HeadId id) {
             return;
         }
         if (const auto* caps = std::get_if<link::up::Caps>(&*up)) it->second.video = caps->video && it->second.channel.remote();
-        if (std::holds_alternative<link::up::Hello>(*up) && it->second.channel.secure())
+        if (std::holds_alternative<link::up::Hello>(*up) && it->second.channel.secure()) {
             std::fprintf(stderr, "i4d: head %u connected over the network (encrypted, key verified)\n", id.value);
+            // Frames will go by datagram once it says hello on UDP too.
+            if (auto k = it->second.channel.datagram_keys(); k && udp_)
+                it->second.udp.emplace(k->first, k->second);
+        }
+        if (const auto* r = std::get_if<link::up::Refresh>(&*up)) {
+            // A frame was lost beyond repair: the next of that window stands
+            // alone (a new stream starts with a keyframe), and goes now.
+            auto& h = it->second;
+            for (auto& [w, s] : h.streams)
+                if (s && (!r->window || *r->window == w)) encoder_.refresh(*s);
+            ++h.refreshes;
+            if (std::getenv("I4D_TRACE") != nullptr)
+                std::fprintf(stderr, "i4d: head %u asked to refresh %s\n", id.value,
+                             r->window ? "a window" : "every window");
+            for (const auto& [w, key] : windows_)
+                if (!r->window || *r->window == w) share_remote(id, h, w);
+            continue;
+        }
         emit(ev::HeadSaid{id, std::move(*up)});
         if (!heads_.contains(id)) return;  // the program dropped it
     }
@@ -285,10 +314,47 @@ std::size_t file_size(int fd) {
 
 }  // namespace
 
+bool Host::send_frame(HeadConn& h, wm::WindowId window, const std::vector<std::byte>& bytes) {
+    if (!h.udp || !h.udp_peer || !udp_) return static_cast<bool>(h.channel.send(bytes));
+    // A datagram the kernel has no room for is a lost frame, not a dead
+    // head: the head notices and asks for a refresh.
+    static const double drop = [] {
+        const char* d = std::getenv("I4_UDP_DROP");  // testing: drop this fraction of datagrams
+        return d ? std::atof(d) : 0.0;
+    }();
+    for (const auto& f : remote::fragment(h.next_frame++, window.value, bytes)) {
+        if (drop > 0 && static_cast<double>(::random() % 10000) < drop * 10000) continue;
+        (void)udp_->send(h.udp->seal(f), &*h.udp_peer);
+    }
+    return true;
+}
+
+void Host::read_udp() {
+    if (!udp_) return;
+    for (auto& [d, from] : udp_->receive()) {
+        const auto token = transport::DatagramSession::token_of(d);
+        if (!token) continue;
+        for (auto& [id, h] : heads_) {
+            if (!h.udp || h.udp->token() != *token) continue;
+            // Only an authenticated datagram tells us where the head is (a
+            // forged one cannot redirect its frames).
+            if (h.udp->open(d)) {
+                if (!h.udp_peer) {
+                    std::fprintf(stderr, "i4d: head %u: frames by datagram (UDP, FEC)\n", id.value);
+                    // From here on its frames stand alone until it has them.
+                    h.streams.clear();
+                }
+                h.udp_peer = from;
+            }
+            break;
+        }
+    }
+}
+
 void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
     auto* s = surface(window);
     if (!s || !s->toplevel || !s->content) return;
-    if (h.channel.unsent() >= kBacklog) {
+    if (!h.udp_peer && h.channel.unsent() >= kBacklog) {
         h.behind.insert(window);
         return;
     }
@@ -380,7 +446,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
                          video->keyframe ? "key" : "delta", video->data.size(),
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         c.layout = std::move(*video);
-        if (!h.channel.send(link::encode(link::Down{c}))) {
+        if (!send_frame(h, window, link::encode(link::Down{c}))) {
             drop_head(id);
             return;
         }
@@ -404,7 +470,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
     const bool nothing = enc->tiles.empty();
     if (!nothing) {
         c.layout = std::move(*enc);
-        if (!h.channel.send(link::encode(link::Down{c}))) {
+        if (!send_frame(h, window, link::encode(link::Down{c}))) {
             drop_head(id);
             return;
         }

@@ -38,6 +38,7 @@
 #include <jaal/jaal.hpp>
 
 #include "../transport/channel.hpp"
+#include "../transport/datagram.hpp"
 #include "../remote/tiles.hpp"
 #include "keyboard.hpp"
 #include "encoder.hpp"
@@ -270,6 +271,12 @@ private:
         /// encoder, one stream per window.
         bool video = false;
         std::map<wm::WindowId, Encoder::StreamPtr> streams;
+        /// Frames by datagram (secure remote heads): the session's keys, and
+        /// where the head is, once it has said hello over UDP.
+        std::optional<transport::DatagramSession> udp;
+        std::optional<transport::DatagramSocket::Peer> udp_peer;
+        std::uint32_t next_frame = 0;
+        std::uint64_t refreshes = 0;
     };
     /// Encode `window`'s content for remote head `id` and send it.
     void share_remote(HeadId id, HeadConn& h, wm::WindowId window);
@@ -344,6 +351,13 @@ private:
     std::optional<Registration> listener_reg_;
     transport::Fd remote_listener_;
     std::optional<Registration> remote_listener_reg_;
+    /// Frames to remote heads, by datagram (the same port as --remote, UDP).
+    std::optional<transport::DatagramSocket> udp_;
+    std::optional<Registration> udp_reg_;
+    void read_udp();
+    /// A frame to a remote head: by datagram (fragmented, with parity) once
+    /// it is reachable on UDP, else on its link. false: the link is dead.
+    bool send_frame(HeadConn& h, wm::WindowId window, const std::vector<std::byte>& bytes);
     std::function<void(Event)> emit_;
     std::function<jaal::result<Registration>(int, jaal::interest, std::uint64_t)> watch_;
 

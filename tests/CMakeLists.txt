@@ -18,6 +18,10 @@ add_executable(test_tiles test_tiles.cpp)
 target_link_libraries(test_tiles PRIVATE i4_remote i4_warnings)
 add_test(NAME test_tiles COMMAND test_tiles)
 
+add_executable(test_frames test_frames.cpp)
+target_link_libraries(test_frames PRIVATE i4_remote i4_warnings)
+add_test(NAME test_frames COMMAND test_frames)
+
 add_executable(test_transport test_transport.cpp)
 target_link_libraries(test_transport PRIVATE i4_transport i4_warnings)
 target_include_directories(test_transport PRIVATE ${PROJECT_SOURCE_DIR}/src)

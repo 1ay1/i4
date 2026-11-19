@@ -58,5 +58,8 @@ private:
 
 /// FFmpeg is linked in: this head can take video.
 [[nodiscard]] bool video_available();
+/// Bring the hardware decoder up now, off the loop, so the first frame
+/// does not wait ~100 ms for it.
+void warm_up();
 
 }  // namespace i4::remote

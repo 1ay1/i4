@@ -327,6 +327,19 @@ Channel::Channel(Fd socket) : socket_(std::move(socket)) {
 
 bool Channel::secure() const { return secure_ && secure_->ready; }
 
+std::optional<std::pair<Key, Key>> Channel::datagram_keys() const {
+    if (!secure()) return std::nullopt;
+    // Separate keys for datagrams (their nonces are explicit packet numbers,
+    // not the stream's counters), derived from this session's: (send, receive).
+    auto derive = [](const std::array<unsigned char, 32>& k) {
+        Key out{};
+        static constexpr unsigned char label[] = "i4 datagrams v1";
+        crypto_generichash(out.data(), out.size(), label, sizeof(label) - 1, k.data(), k.size());
+        return out;
+    };
+    return std::pair{derive(secure_->tx), derive(secure_->rx)};
+}
+
 std::expected<std::pair<Channel, Channel>, ChannelError> Channel::pair() {
     int fds[2];
     if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) != 0)
