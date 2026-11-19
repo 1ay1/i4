@@ -303,13 +303,24 @@ public:
                     mayag::PatchData pd;
                     pd.width = pic.width;
                     pd.height = pic.height;
-                    if (e.keyframe || !patch_in_place) {
+                    // A move is done on the GPU where the window can (the pixels
+                    // are already there); then only the new tiles go up. The
+                    // whole picture rides along in case it cannot.
+                    if (e.scroll && !written.empty()) {
+                        pd.move = std::array<int, 5>{e.scroll->x, e.scroll->y, e.scroll->w, e.scroll->h, e.scroll->dy};
+                        written.erase(written.begin());  // apply_rgba lists the move first
+                    }
+                    std::size_t rewritten = 0;
+                    for (const auto& wr : written) rewritten += static_cast<std::size_t>(wr[2]) * static_cast<std::size_t>(wr[3]);
+                    const bool most = rewritten * 2 > static_cast<std::size_t>(pic.width) * static_cast<std::size_t>(pic.height);
+                    if (e.keyframe || !patch_in_place || most || (pd.move && !move_in_place)) {
                         mayag::ImageData img;
                         img.width = pic.width;
                         img.height = pic.height;
                         img.rgba = pic.rgba;
                         pd.whole = jaal::shared<mayag::ImageData>::make(std::move(img));
-                    } else {
+                    }
+                    if (!e.keyframe && patch_in_place && !most) {
                         const auto pitch = static_cast<std::size_t>(pic.width) * 4;
                         for (const auto& wr : written)
                             for (int y = wr[1]; y < wr[1] + wr[3]; ++y) {
@@ -318,8 +329,11 @@ public:
                                 pd.pixels.insert(pd.pixels.end(), row, row + static_cast<std::size_t>(wr[2]) * 4);
                             }
                         pd.rects = std::move(written);
+                    } else {
+                        pd.move.reset();  // the whole picture it is
                     }
                     h.patch = jaal::shared<mayag::PatchData>::make(std::move(pd));
+                    check_gpu_.push_back(c->window);
                 } else {
                     refresh(c->window);  // a delta without its base: start over
                 }
@@ -377,6 +391,36 @@ public:
     template <class K>
     void present(K& k) {
         window_.present(k);
+        // I4_HEAD_VERIFY: what the GPU holds (after in-place patches and GPU
+        // moves) is byte for byte the picture this head decoded.
+        if constexpr (requires { window_.window().read_image(1u); })
+            if (static const bool verify = std::getenv("I4_HEAD_VERIFY") != nullptr; verify)
+                for (auto w : std::exchange(check_gpu_, {})) {
+                    const auto it = pictures_.find(w);
+                    if (it == pictures_.end()) continue;
+                    const auto gpu = window_.window().read_image(texture_of(w));
+                    if (gpu.empty()) continue;
+                    const bool same = gpu == it->second.rgba;
+                    ++(same ? gpu_same_ : gpu_differ_);
+                    if (!same && gpu_differ_ <= 3) {
+                        std::size_t at = 0, n = 0;
+                        const auto& cpu = it->second.rgba;
+                        for (std::size_t i = 0; i < std::min(gpu.size(), cpu.size()); ++i)
+                            if (gpu[i] != cpu[i]) {
+                                if (n++ == 0) at = i;
+                            }
+                        const auto px = at / 4;
+                        std::fprintf(stderr,
+                                     "i4-head: verify gpu first diff at x %zu y %zu  gpu %u,%u,%u,%u cpu %u,%u,%u,%u  (%zu bytes differ, sizes %zu/%zu)\n",
+                                     px % static_cast<std::size_t>(it->second.width), px / static_cast<std::size_t>(it->second.width),
+                                     gpu[px * 4], gpu[px * 4 + 1], gpu[px * 4 + 2], gpu[px * 4 + 3], cpu[px * 4], cpu[px * 4 + 1],
+                                     cpu[px * 4 + 2], cpu[px * 4 + 3], n, gpu.size(), cpu.size());
+                    }
+                    if (!same || (gpu_same_ + gpu_differ_) % 50 == 0)
+                        std::fprintf(stderr, "i4-head: verify gpu window %u %s  (%llu same, %llu differ)\n", w.value,
+                                     same ? "same" : "DIFFERS", static_cast<unsigned long long>(gpu_same_),
+                                     static_cast<unsigned long long>(gpu_differ_));
+                }
         if constexpr (local_gpu) {
             // Buffers the GPU has finished with go back to their clients now,
             // not at the next frame (which, on an idle screen, never comes).
@@ -512,8 +556,9 @@ public:
         static const bool scroll = std::getenv("I4_HEAD_SCROLL_PROBE") != nullptr;
         if (scroll) {
             // The wheel goes to the window under the pointer: put it in the
-            // middle of the screen (where a lone window is) first.
-            send_up(link::Up{link::up::Motion{{400, 300}}});
+            // middle of the screen (where a lone window is), once.
+            if (!probe_pointed_) send_up(link::Up{link::up::Motion{{400, 300}}});
+            probe_pointed_ = true;
             // Three wheel notches down then back up, alternating: a page
             // that can scroll both ways forever.
             link::up::Scroll s;
@@ -556,6 +601,8 @@ private:
         requires(Window& w, const std::vector<std::array<int, 4>>& r, const std::vector<std::uint8_t>& px) {
             w.window().update_image_regions(1u, 1, 1, r, px);
         };
+    /// The platform's window moves rows of an image on the GPU (a scroll).
+    static constexpr bool move_in_place = requires(Window& w) { w.window().move_image_rows(1u, 0, 0, 1, 1, 0); };
     static constexpr bool local_gpu = requires(Window& w, mayag::Dmabuf d) {
         w.window().import_image(1u, d, 1, 1, {});
         w.window().poll_gpu_retired();
@@ -761,6 +808,7 @@ private:
     std::optional<std::chrono::steady_clock::time_point> probe_sent_;  // I4_HEAD_PROBE
     bool probe_answered_ = true;
     bool probe_flip_ = false;
+    bool probe_pointed_ = false;
     std::uint64_t input_seq_ = 0;  // up::Sequenced numbers sent
     std::optional<double> answer_due_;   // the oldest press sent to a client and not yet answered
     std::vector<double> photon_;          // key -> photon samples (ms)
@@ -778,6 +826,8 @@ private:
     std::map<wm::WindowId, remote::Picture> pictures_;  // the last decoded picture, to diff against
     std::set<wm::WindowId> broken_;  // a video frame was lost: deltas wait for a keyframe
     bool told_software_ = false;     // the session knows video decodes in software here
+    std::vector<wm::WindowId> check_gpu_;  // I4_HEAD_VERIFY: textures to compare after the next present
+    std::uint64_t gpu_same_ = 0, gpu_differ_ = 0;
     /// Refreshes asked and not yet answered by a keyframe (see ask_refresh).
     std::map<wm::WindowId, std::optional<std::chrono::steady_clock::time_point>> asked_;
     std::optional<std::chrono::steady_clock::time_point> asked_all_;

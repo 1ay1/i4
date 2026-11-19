@@ -167,6 +167,21 @@ TEST(kill_asks_the_client_and_exec_spawns) {
     CHECK(spawn.size() == 1 && spawn.at(0).command == "foot");
 }
 
+TEST(a_window_that_appears_under_a_still_pointer_gets_it) {
+    H h;
+    h.send(ev::OutputReady{output()});
+    const auto head = attach(h);
+    h.send(ev::HeadSaid{head, link::up::Motion{{100, 100}}});  // over nothing yet
+    h.record().clear();
+    h.send(ev::Mapped{wm::WindowId{1}, app("a")});  // fills the screen: now under it
+    const auto at = all<do_pointer_at>(h);
+    CHECK(at.size() == 1 && at.at(0).window == wm::WindowId{1});
+    // A scroll goes to it without the pointer moving.
+    h.record().clear();
+    h.send(ev::HeadSaid{head, link::up::Scroll{}});
+    CHECK_EQ(h.effects<do_scroll>().size(), 1u);
+}
+
 TEST(clicking_a_window_focuses_it_and_input_goes_there) {
     H h;
     h.send(ev::OutputReady{output()});

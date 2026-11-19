@@ -20,6 +20,8 @@ std::vector<HeadId> welcomed(const Model& m) {
     return out;
 }
 
+fx::PointerAt hit(const wm::Arrangement& a, Point<space::Desktop> at);
+
 /// After the State changed: tell clients what arrange() now says about them.
 void sync(Model& m, std::vector<Cmd>& out) {
     m.arranged = wm::arrange(m.session.state());
@@ -37,6 +39,15 @@ void sync(Model& m, std::vector<Cmd>& out) {
     if (m.arranged.keyboard_focus != m.keyboard) {
         m.keyboard = m.arranged.keyboard_focus;
         out.push_back(fx::KeyboardFocus{m.keyboard});
+    }
+    // The pointer did not move, the windows did: whatever is under it now
+    // has the pointer (a window mapped under it can be scrolled at once).
+    if (m.pointer_at) {
+        const auto p = hit(m.arranged, *m.pointer_at);
+        if (p.window != m.pointer) {
+            m.pointer = p.window;
+            out.push_back(p);
+        }
     }
 }
 
@@ -285,6 +296,7 @@ Cmd Session::update(Model& m, ev::HeadSaid e) {
             [&](const link::up::Motion& mo) {
                 const auto p = hit(m.arranged, mo.at);
                 m.pointer = p.window;
+                m.pointer_at = mo.at;
                 out.push_back(p);
             },
             [&](const link::up::Button& b) {

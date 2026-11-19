@@ -55,6 +55,9 @@ struct Session {
         std::map<wm::WindowId, std::uint64_t> generation;
         std::optional<wm::WindowId> keyboard;
         std::optional<wm::WindowId> pointer;
+        /// Where the pointer last was (desktop px): a window that appears
+        /// under, or moves away from, a still pointer gets enter/leave.
+        std::optional<Point<space::Desktop>> pointer_at;
         std::map<HeadId, Head> heads;
         /// The head whose keyboard clients currently have (the last to type).
         std::optional<HeadId> typist;

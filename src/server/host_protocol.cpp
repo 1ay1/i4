@@ -741,6 +741,9 @@ void Host::handle(const fx::Modifiers& e) {
 }
 
 void Host::handle(const fx::Scroll& e) {
+    if (static const bool tr = std::getenv("I4D_TRACE") != nullptr; tr)
+        std::fprintf(stderr, "i4d: t=%.3f scroll in\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count());
     if (!pointer_focus_) return;
     const auto& s = e.scroll;
     const auto t = now_ms();

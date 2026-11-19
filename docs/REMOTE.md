@@ -78,6 +78,11 @@ The head sends a small datagram every 50 ms so a Wi-Fi radio never dozes
 - **Scroll as a move.** Whole-row hashes vote for a vertical shift; the
   head moves the pixels it already has (`Encoded.scroll`) and only the
   newly revealed rows travel. A terminal printing a line costs one line.
+- **Scroll predicted on the head.** A wheel or trackpad scroll moves the
+  window's pixels on the Mac at once, before the session hears of it; the
+  session's moves settle the guess as the client's frames arrive, and a
+  window that does not scroll (htop) drops it after three frames.
+  `I4_NO_PREDICT_SCROLL=1` turns it off.
 - **Changed tiles, lossless.** Read off the GPU (only those), zstd. A
   keystroke is ~200 bytes; the head pastes it into its texture in place.
 - **Video only when it pays.** Most of the window changed AND the head
@@ -109,10 +114,12 @@ Earlier, Linux head (local network, fullscreen):
 | local head (zero copy) | 3.8 ms | 4.1 ms |
 | network head (direct, encrypted) | 4.8 ms | 5.5 ms |
 
-Tools: `I4_HEAD_PROBE=MS` types into the focused window and logs key->frame;
-`I4D_TRACE=1` stamps key in / commit / sent on i4d; `I4D_VERIFY=1` with
-`I4_HEAD_VERIFY=1` hash every frame on both ends to prove the head holds
-exactly what the client drew.
+Tools: `I4_HEAD_PROBE=MS` types into the focused window and logs key->frame
+(with `I4_HEAD_SCROLL_PROBE=1` it scrolls instead, and marks answers that
+came as a move); with `I4_HEAD_TRACE=1` the head also logs key->photon from
+the Mac's presented handlers; `I4D_TRACE=1` stamps key in / commit / sent on
+i4d; `I4D_VERIFY=1` with `I4_HEAD_VERIFY=1` hash every frame on both ends to
+prove the head holds exactly what the client drew.
 
 For the lowest latency run the head fullscreen: `i4-head --fullscreen` (or
 `I4_FULLSCREEN=1`). The host compositor then scans the head's buffer out

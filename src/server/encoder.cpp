@@ -573,6 +573,10 @@ struct Encoder::Impl {
         int dy = 0, best = 0;
         for (const auto& [d, n] : votes)
             if (n > best) best = n, dy = d;
+        static const bool tr = std::getenv("I4D_TRACE") != nullptr;
+        if (tr && changed >= 64)
+            std::fprintf(stderr, "i4d: scroll vote: %d rows changed, best dy %d with %d votes, %zu candidates\n",
+                         changed, dy, best, votes.size());
         if (best < 8 || best * 3 < changed) return std::nullopt;
         // The longest run of rows the move explains (gaps of a few rows are
         // fine: they are re-sent as tiles after the move).
