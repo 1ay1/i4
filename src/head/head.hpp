@@ -64,6 +64,9 @@ struct GpuReady {
 };
 /// The session went away.
 struct Lost {};
+/// Video from the session decodes in software here (the platform refused
+/// it): resend Caps saying so, so the session sends tiles instead.
+struct SoftwareVideo {};
 
 // The seat itself, where the platform has a raw tap (Wayland): every key
 // press AND release by evdev code, the exact xkb state, and scroll as the
@@ -101,7 +104,7 @@ using Events = std::variant<mayag::KeyEvent, mayag::TextEvent, mayag::ComposeEve
                             mayag::ResizeEvent, mayag::FocusEvent, mayag::CloseRequest, mayag::Clicked,
                             mayag::Activated, mayag::Pressed, mayag::Released, mayag::Entered, mayag::Left,
                             mayag::Dragged, mayag::Scrolled, Heard, GpuDone, GpuReady, Lost, KeyInput, KeymapInput,
-                            RepeatInput, ModsInput, KeyboardLeft, ScrollInput>;
+                            RepeatInput, ModsInput, KeyboardLeft, ScrollInput, SoftwareVideo>;
 
 // -- what the program asks the host for -------------------------------------------
 
@@ -141,6 +144,10 @@ struct Head {
         wm::Bindings bindings;
         wm::Mod mod = wm::Mod::alt;
         Size<space::Desktop> screen{1280, 800};
+        /// The screen's backing scale (2 on Retina), from the window.
+        std::int32_t scale = 1;
+        /// What up::Caps said last (resent with a new scale), once the GPU is up.
+        std::optional<link::up::Caps> caps;
         bool lost = false;
 
         /// Each window's newest frame: the texture it is uploaded as, and
@@ -181,7 +188,7 @@ struct Head {
     using Msg = std::variant<Heard, GpuDone, GpuReady, Lost, mayag::KeyEvent, mayag::TextEvent, mayag::Clicked, mayag::MouseMove,
                              mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, ClearNotice,
                              mayag::CloseRequest, KeyInput, KeymapInput, RepeatInput, ModsInput, KeyboardLeft,
-                             ScrollInput, mayag::ScrollEvent>;
+                             ScrollInput, mayag::ScrollEvent, SoftwareVideo>;
     using Cmd = mayag::Cmd<Msg, do_say, do_forget, do_cursor, mayag::upload_image, mayag::patch_image, mayag::release_image,
                            mayag::set_title>;
     using Sub = mayag::Sub<Msg>;
@@ -191,6 +198,7 @@ struct Head {
     static Cmd update(Model& m, GpuDone d);
     static Cmd update(Model& m, GpuReady g);
     static Cmd update(Model& m, Lost);
+    static Cmd update(Model& m, SoftwareVideo);
     static Cmd update(Model& m, KeyInput k);
     static Cmd update(Model& m, KeymapInput k);
     static Cmd update(Model& m, RepeatInput r);

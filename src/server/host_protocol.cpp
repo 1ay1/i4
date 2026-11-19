@@ -165,6 +165,33 @@ void Host::forget(srv::Client& c) {
     std::erase_if(sources_, [&](const auto& kv) { return kv.first.first == &c; });
     if (selection_ && selection_->first == &c) set_selection(std::nullopt);
     seats_.erase(&c);
+    outputs_.erase(&c);
+}
+
+void Host::enter_outputs(Surface& s) {
+    for (const auto& [oid, ov] : outputs_[s.client])
+        srv::Resource<wl_surface, compositor_version>{s.client, s.id}.send<wl_surface::events::enter>(
+            nonnull<wl_output>(oid));
+}
+
+void Host::rescale() {
+    std::int32_t want = 1;
+    for (const auto& [id, h] : heads_) want = std::max(want, h.scale);
+    if (want == scale_) return;
+    scale_ = want;
+    std::fprintf(stderr, "i4d: clients render at scale %d\n", scale_);
+    // Old-style clients follow the output's scale; new ones the surface's.
+    for (const auto& [c, outs] : outputs_)
+        for (const auto& [oid, ov] : outs)
+            if (ov >= 2) {
+                srv::Resource<wl_output, 4> o{c, oid};
+                o.send<wl_output::events::scale>(scale_);
+                o.send<wl_output::events::done>();
+            }
+    for (const auto& [key, s] : surfaces_)
+        if (s && s->version >= 6)
+            srv::Resource<wl_surface, compositor_version>{s->client, s->id}.send<wl_surface::events::preferred_buffer_scale>(
+                scale_);
 }
 
 // -- wl_compositor, wl_surface, wl_region -----------------------------------------------
@@ -172,7 +199,7 @@ void Host::forget(srv::Client& c) {
 void Host::bind_compositor(srv::Client& client, std::uint32_t version, id_t id) {
     auto l = std::make_shared<srv::RequestListener<wl_compositor>>();
 
-    l->on<wl_compositor::requests::create_surface>([this, &client](srv::NewObject<wl_surface> s) {
+    l->on<wl_compositor::requests::create_surface>([this, &client, version](srv::NewObject<wl_surface> s) {
         auto& surf = surfaces_[{&client, s.id()}];
         surf = std::make_unique<Surface>();
         surf->client = &client;
@@ -205,7 +232,9 @@ void Host::bind_compositor(srv::Client& client, std::uint32_t version, id_t id) 
         sl->on<wl_surface::requests::damage_buffer>(damaged);
         sl->on<wl_surface::requests::set_opaque_region>([](Ref<wl_region>) {});
         sl->on<wl_surface::requests::set_input_region>([](Ref<wl_region>) {});
-        sl->on<wl_surface::requests::set_buffer_scale>([](std::int32_t) {});
+        sl->on<wl_surface::requests::set_buffer_scale>([this, &client, sid](std::int32_t scale) {
+            if (auto* x = surface(&client, sid)) x->pending_scale = std::clamp(scale, 1, 8);
+        });
         sl->on<wl_surface::requests::set_buffer_transform>([](wl_output_transform) {});
         sl->on<wl_surface::requests::offset>([this, &client, sid](std::int32_t dx, std::int32_t dy) {
             if (auto* x = surface(&client, sid)) {
@@ -214,6 +243,11 @@ void Host::bind_compositor(srv::Client& client, std::uint32_t version, id_t id) 
             }
         });
         s.bind<compositor_version>(sl);
+        // Render at the scale the heads show (Retina: 2), from the start.
+        surf->version = std::min(version, compositor_version);
+        if (surf->version >= 6 && scale_ > 1)
+            srv::Resource<wl_surface, compositor_version>{&client, sid}.send<wl_surface::events::preferred_buffer_scale>(
+                scale_);
     });
 
     l->on<wl_compositor::requests::create_region>([](srv::NewObject<wl_region> r) {
@@ -228,6 +262,7 @@ void Host::bind_compositor(srv::Client& client, std::uint32_t version, id_t id) 
 }
 
 void Host::committed(Surface& s) {
+    s.buffer_scale = s.pending_scale;
     // linux-drm-syncobj's commit rules, checked before anything is applied.
     if (s.explicit_sync && s.pending.attach && *s.pending.attach) {
         using E = wp_linux_drm_syncobj_surface_v1::error;
@@ -265,6 +300,9 @@ void Host::committed(Surface& s) {
         const wm::WindowId w{next_window_++};
         t.life = life::Mapped{w};
         windows_[w] = {s.client, s.id};
+        // On the session's output: toolkits that size buffers by the
+        // outputs a surface is on (GLFW, so kitty) learn its scale here.
+        enter_outputs(s);
         emit(ev::Mapped{w, t.info});
     }
     (void)damage;  // recorded, not yet used: remote heads diff on the GPU (clients often damage everything)
@@ -546,11 +584,14 @@ void Host::bind_seat(srv::Client& client, std::uint32_t version, id_t id) {
 void Host::bind_output(srv::Client& client, std::uint32_t version, id_t id) {
     // One fixed output advertised for now; heads report real ones next.
     auto l = std::make_shared<srv::RequestListener<wl_output>>();
-    l->on<wl_output::requests::release>([] {});
+    l->on<wl_output::requests::release>([this, &client, id] {
+        std::erase_if(outputs_[&client], [&](const auto& o) { return o.first == id; });
+    });
     auto out = client.bind_resource<wl_output, 4>(id, l, version);
+    outputs_[&client].emplace_back(id, version);
     out.send<wl_output::events::geometry>(0, 0, 0, 0, wl_output::subpixel::unknown, "i4", "i4", wl_output::transform::normal);
     out.send<wl_output::events::mode>(wl_output::mode::current, 1920, 1080, 60000);
-    if (version >= 2) out.send<wl_output::events::scale>(1);
+    if (version >= 2) out.send<wl_output::events::scale>(scale_);
     if (version >= 4) out.send<wl_output::events::name>("i4-0");
     if (version >= 2) out.send<wl_output::events::done>();
 }

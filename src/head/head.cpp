@@ -135,16 +135,25 @@ Cmd Head::update(Model&, GpuDone d) { return say(link::up::Released{d.window, d.
 
 /// The session offers clients exactly this over linux-dmabuf, so they render
 /// straight into memory this GPU shows as it is.
-Cmd Head::update(Model&, GpuReady g) {
+Cmd Head::update(Model& m, GpuReady g) {
     // Across a network the session reads each frame to send it. From shm that
     // costs ~0.7 ms; from a GPU buffer (even LINEAR) on a discrete card it is
     // a read across PCIe from video memory, ~8 ms, on the session's loop. So
     // a remote head offers none: clients draw to shm. (Native speed for GPU
     // clients needs the read on the GPU: an encoder next to the session.)
     if (!options.zero_copy || options.remote) g.formats.clear();
-    std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts%s\n", g.formats.size(),
-                 options.remote ? ", frames as video" : "");
-    return say(link::up::Caps{std::move(g.formats), options.remote});
+    std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts%s, scale %d\n", g.formats.size(),
+                 options.remote ? ", frames as video" : "", m.scale);
+    link::up::Caps caps{std::move(g.formats), options.remote};
+    caps.scale = m.scale;
+    m.caps = caps;
+    return say(std::move(caps));
+}
+
+Cmd Head::update(Model& m, SoftwareVideo) {
+    if (!m.caps) return {};
+    m.caps->video_hw = false;
+    return say(*m.caps);
 }
 
 Cmd Head::update(Model& m, Lost) {
@@ -317,7 +326,14 @@ Cmd Head::update(Model& m, mayag::MouseUp e) {
 
 Cmd Head::update(Model& m, mayag::ResizeEvent e) {
     m.screen = {static_cast<std::int32_t>(e.size.x), static_cast<std::int32_t>(e.size.y)};
-    return report_output(m);
+    // A remote head asks for pixels at its backing scale (Retina: 2), so
+    // windows arrive as sharp as local ones. Integer scales only.
+    const auto scale = options.remote ? std::max(1, static_cast<std::int32_t>(e.dpi_scale + 0.5f)) : 1;
+    if (scale == m.scale) return report_output(m);
+    m.scale = scale;
+    if (!m.caps) return report_output(m);
+    m.caps->scale = scale;
+    return Cmd::batch(report_output(m), say(*m.caps));
 }
 
 Cmd Head::update(Model& m, Tick t) {

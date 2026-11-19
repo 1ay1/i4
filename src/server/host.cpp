@@ -153,7 +153,7 @@ void Host::accept_head(const transport::Fd& listener, const transport::Key* key)
     next_head_ = next_head_.next();
     if (ch->remote() && !ch->secure() && key == nullptr)
         std::fprintf(stderr, "i4d: head %u connected over the network (unencrypted)\n", id.value);
-    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}, false, true, {}, std::nullopt, std::nullopt, 0, 0};
+    HeadConn h{.channel = std::move(*ch)};
     if (auto r = watch_(h.channel.fd(), jaal::interest::read, kHeadBase + id.value)) h.reg.emplace(std::move(*r));
     heads_.emplace(id, std::move(h));
     emit(ev::HeadJoined{id});
@@ -178,9 +178,11 @@ void Host::read_head(HeadId id) {
         if (const auto* caps = std::get_if<link::up::Caps>(&*up)) {
             it->second.video = caps->video && it->second.channel.remote();
             it->second.video_hw = caps->video_hw;
+            it->second.scale = std::clamp(caps->scale, 1, 4);
             if (caps->video && !caps->video_hw)
                 std::fprintf(stderr, "i4d: head %u decodes video in software: big changes go as GPU-read tiles\n",
                              id.value);
+            rescale();
         }
         if (std::holds_alternative<link::up::Hello>(*up) && it->second.channel.secure()) {
             std::fprintf(stderr, "i4d: head %u connected over the network (encrypted, key verified)\n", id.value);
@@ -218,7 +220,10 @@ void Host::read_head(HeadId id) {
 }
 
 void Host::drop_head(HeadId id) {
-    if (heads_.erase(id) != 0) emit(ev::HeadLeft{id});
+    if (heads_.erase(id) != 0) {
+        emit(ev::HeadLeft{id});
+        rescale();
+    }
 }
 
 /// Watch for writability exactly while packets are queued.

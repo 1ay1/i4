@@ -150,6 +150,11 @@ struct Toplevel {
 struct Surface {
     srv::Client* client = nullptr;
     id_t id = 0;
+    /// wl_surface's bound version (preferred_buffer_scale needs 6).
+    std::uint32_t version = 1;
+    /// wl_surface.set_buffer_scale: buffer pixels per surface unit. Pending
+    /// until commit, like everything else the client sets.
+    std::int32_t buffer_scale = 1, pending_scale = 1;
     Pending pending;
     Current current;
     std::optional<Toplevel> toplevel;
@@ -273,6 +278,8 @@ private:
         /// Its decoder is hardware (up::Caps.video_hw). If not, every change
         /// goes as tiles read off the GPU; video only when that fails.
         bool video_hw = true;
+        /// Its backing scale (up::Caps.scale): 2 on a Retina screen.
+        std::int32_t scale = 1;
         std::map<wm::WindowId, Encoder::StreamPtr> streams;
         /// Frames by datagram (secure remote heads): the session's keys, and
         /// where the head is, once it has said hello over UDP.
@@ -287,6 +294,11 @@ private:
     };
     /// One numbered input from either path: applied once, in order.
     void sequenced(HeadId id, HeadConn& h, link::up::Sequenced s);
+    /// Clients render at the largest scale any head shows: told by
+    /// wl_surface.preferred_buffer_scale (and wl_output.scale for old
+    /// clients) whenever that changes. 1 with no heads.
+    void rescale();
+    std::int32_t scale_ = 1;
     /// Encode `window`'s content for remote head `id` and send it.
     void share_remote(HeadId id, HeadConn& h, wm::WindowId window);
     static constexpr std::size_t kBacklog = 256u << 10;  // bytes in flight before frames are skipped
@@ -415,6 +427,10 @@ private:
         std::vector<id_t> data_devices;
     };
     std::map<srv::Client*, Seat> seats_;
+    /// Every client's wl_output objects (id, version): surfaces enter them,
+    /// and a scale change is re-announced on them.
+    std::map<srv::Client*, std::vector<std::pair<id_t, std::uint32_t>>> outputs_;
+    void enter_outputs(Surface& s);
 
     // The clipboard. A source is a client's offer of data in some MIME
     // types; the selection is at most one source; every other client reads

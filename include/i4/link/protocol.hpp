@@ -155,6 +155,11 @@ struct Caps {
     /// is sent changed tiles read off the session's GPU even for big
     /// changes: a few ms where software HEVC costs ~50 ms a frame.
     bool video_hw = true;
+    /// The head's backing scale (2 on a Retina screen). The session asks
+    /// clients to render at the largest any head shows (wl_surface
+    /// preferred_buffer_scale): the window stays the same logical size,
+    /// its buffer has 4x the pixels, and text is as sharp as a local app's.
+    std::int32_t scale = 1;
     friend bool operator==(const Caps&, const Caps&) = default;
 };
 /// A frame sent by datagram (see remote/frames.hpp) was lost beyond repair:

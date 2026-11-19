@@ -252,7 +252,7 @@ public:
                     if (dec->software() && !told_software_) {
                         told_software_ = true;
                         std::fprintf(stderr, "i4-head: video decodes in software here; asking for tiles instead\n");
-                        (void)link_.send(link::encode(link::Up{link::up::Caps{{}, true, false}}));
+                        emit_(SoftwareVideo{});
                     }
                     // Only what changed goes to the GPU; the whole picture
                     // rides along for the first frame or a resize.
