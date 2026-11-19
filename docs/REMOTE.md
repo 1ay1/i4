@@ -76,8 +76,9 @@ The head sends a small datagram every 50 ms so a Wi-Fi radio never dozes
   hashes every 64 px row segment (64 bits). ~250 KB of hashes come back,
   not the frame; the CPU compares them with the last frame's. 0.6 ms.
 - **Scroll as a move.** Whole-row hashes vote for a vertical shift; the
-  head moves the pixels it already has (`Encoded.scroll`) and only the
-  newly revealed rows travel. A terminal printing a line costs one line.
+  head moves the pixels it already has (`Encoded.scroll`, on the Mac's GPU)
+  and only the newly revealed rows travel. A terminal printing a line costs
+  one line. Both encoders do it: the GPU one and the shm/CPU one.
 - **Scroll predicted on the head.** A wheel or trackpad scroll moves the
   window's pixels on the Mac at once, before the session hears of it; the
   session's moves settle the guess as the client's frames arrive, and a
@@ -103,9 +104,13 @@ the Mac):
 | before (CPU-side diff, TCP input) | 28.8 ms | 35.9 ms |
 | GPU row hashes | 8.6 ms | 31 ms |
 | + input by UDP | **6.5 ms** | **7.3 ms** |
+| + Retina 2x (2552x1536) | 7.4 ms | 8.3 ms |
+| scroll in `less` (2x, answered by a move) | 8.8 ms | 10.7 ms |
 
 Of the 6.5 ms: ~3.7 ms is the network round trip, ~1.5 ms kitty drawing,
-<1 ms i4d (diff, read, pack, seal), <0.1 ms the Mac pasting the tile.
+<1 ms i4d (diff, read, pack, seal), <0.1 ms the Mac pasting the tile. A
+scroll is predicted on the Mac, so it moves at once; the numbers above are
+until the client's own answer lands.
 
 Earlier, Linux head (local network, fullscreen):
 
