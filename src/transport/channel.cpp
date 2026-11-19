@@ -33,6 +33,9 @@
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+#ifndef MSG_CMSG_CLOEXEC
+#define MSG_CMSG_CLOEXEC 0  // macOS: received fds are set close-on-exec below
+#endif
 
 namespace i4::transport {
 
@@ -622,6 +625,9 @@ std::expected<std::vector<Packet>, ChannelError> Channel::receive() {
             for (std::size_t i = 0; i < count; ++i) {
                 int fd = -1;
                 std::memcpy(&fd, CMSG_DATA(c) + i * sizeof(int), sizeof(int));
+#ifdef I4_NO_SOCK_FLAGS
+                ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
                 p.fds.emplace_back(fd);
             }
         }

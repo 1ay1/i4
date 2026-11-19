@@ -21,6 +21,6 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-16 \
                 -DI4_BUILD_TESTS=OFF
       - name: Build i4-head
-        run: cmake --build build -j --target i4-head
+        run: cmake --build build -j --target i4-head -- -k 0
       - name: It runs
         run: ./build/i4-head --link tcp:127.0.0.1:1 --key 0000000000000000000000000000000000000000000000000000000000000000 || true
