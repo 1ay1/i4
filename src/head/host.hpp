@@ -384,15 +384,19 @@ private:
     /// stream. Wired only where the platform has it; elsewhere the program
     /// falls back to mayag's events.
     void tap() {
-#if (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
+#if ((defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)) || defined(__APPLE__)
         if constexpr (requires { native_.set_raw_input([](const mayag::platform::RawInput&) {}); }) {
             // The head's own events do not start the photon clock: what
             // counts is when a CLIENT's answer to a key reaches the glass.
-            native_.set_photon_manual(true);
-            native_.set_photon_sink([this](double ms) {
-                photon_.push_back(ms);
-                if (trace_) std::fprintf(stderr, "i4-head: key->photon %.2f ms\n", ms);
-            });
+            [this](auto& n) {
+                if constexpr (requires { n.set_photon_manual(true); }) {
+                    n.set_photon_manual(true);
+                    n.set_photon_sink([this](double ms) {
+                        photon_.push_back(ms);
+                        if (trace_) std::fprintf(stderr, "i4-head: key->photon %.2f ms\n", ms);
+                    });
+                }
+            }(native_);
             native_.set_raw_input([this](const mayag::platform::RawInput& in) {
                 namespace r = mayag::platform::raw;
                 if (!emit_) return;
