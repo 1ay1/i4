@@ -12,10 +12,19 @@ An i3-style tiling Wayland compositor with a client/server split.
 apps ──wayland──▶ i4d ◀──link──▶ i4-head ──▶ screen, keyboard, GPU
 ```
 
-Status: the window manager core (`wm`) is complete and tested. It covers
-i3's tree, commands, layouts, workspaces, outputs, floating, fullscreen and
-resize, and it is deterministic and fuzzed. The protocol server and the
-presenter come next.
+Status:
+
+- **Window manager core (`wm`)**: complete. i3's tree, commands, layouts,
+  workspaces, outputs, floating, fullscreen, resize and default bindings.
+  It's deterministic, integer-only and fuzzed.
+- **Link**: complete. A wire format derived from the types, a fingerprinted
+  protocol, and a replica that predicts keypresses and converges exactly.
+- **Head**: started. It draws on mayag.
+- **Wayland server (i4d, on loom)**: next.
+
+Try it with `./build/debug/i4-preview`. That's the server, link and head
+in one window. Press F1 to add 400 ms of network latency: window management
+still responds in the same frame.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

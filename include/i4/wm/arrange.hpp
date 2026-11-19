@@ -28,6 +28,8 @@ struct Tile {
     Rect<Desktop> content;  // the client's surface
     Layer layer;
     bool focused;  // inside the focused con: draw the focus colour
+    /// The window's title, or its app_id when it has none.
+    std::string label;
 
     friend bool operator==(const Tile&, const Tile&) = default;
 };

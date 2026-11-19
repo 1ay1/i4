@@ -2,7 +2,7 @@
 
 function(i4_test name)
     add_executable(${name} ${name}.cpp)
-    target_link_libraries(${name} PRIVATE i4::wm i4_warnings)
+    target_link_libraries(${name} PRIVATE i4::link i4_warnings)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -10,6 +10,9 @@ i4_test(test_parse)
 i4_test(test_wm)
 i4_test(test_arrange)
 i4_test(test_determinism)
+i4_test(test_wire)
+i4_test(test_replica)
+i4_test(test_bindings)
 
 # Compile-fail: each file in fail/ must compile as written and must NOT
 # compile with -DI4_FAIL. The positive control stops a typo or a missing
@@ -25,3 +28,7 @@ endforeach()
 
 add_test(NAME layering
          COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR} -P ${PROJECT_SOURCE_DIR}/cmake/layering.cmake)
+
+if(TARGET i4-preview)
+    add_test(NAME preview_headless COMMAND i4-preview --headless)
+endif()

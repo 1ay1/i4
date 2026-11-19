@@ -27,12 +27,12 @@ Bottom to top. A layer may only include layers below it.
 
 | Layer    | What it is                                  | Portable | Status    |
 |----------|---------------------------------------------|----------|-----------|
-| `base`   | ids, typed coordinate spaces, match, expect | yes      | done      |
-| `wm`     | the i3 brain: tree, commands, arrangement   | yes      | done      |
-| `link`   | server ↔ head messages and transports       | yes      | next      |
-| `server` | i4d: Wayland protocol + policy, on jaal     | Linux    | planned   |
-| `head`   | i4-head: output, input, rendering, on mayag | per-OS   | planned   |
-| `app`    | the binaries                                | —        | planned   |
+| `base`   | ids, spaces, match, enum ranges, flags      | yes      | done      |
+| `wm`     | the i3 brain: tree, commands, bindings      | yes      | done      |
+| `link`   | wire codec, protocol, replica + prediction  | yes      | done      |
+| `server` | i4d: Wayland protocol + policy, on loom     | Linux    | next      |
+| `head`   | i4-head: keys, motion, view, on mayag       | per-OS   | started   |
+| `app`    | the binaries (`i4-preview` today)           | —        | started   |
 
 `server` and `head` share a rank, so neither can include the other. They
 meet only through `link`.
@@ -69,6 +69,75 @@ property:
 2. **Replay.** A bug report is an event log, and replaying it reproduces the
    exact state.
 3. **Undo.** A `State` is cheap to copy, so undo is a stack of copies.
+
+## The link replicates events, not pixels or state
+
+```
+head   -> Hello{protocol fingerprint}
+server -> Welcome{seq, State}           the replica, once
+server -> Applied{seq, Event, by?}      then every event, in order
+head   -> Request{nonce, Event}         a keypress
+```
+
+- **The wire format is derived from the types** (`i4/link/wire.hpp`). C++26
+  structured-binding packs (`auto& [...m] = v;`) take any struct apart, so
+  there is no IDL and there are no hand-written serialisers. Integers are
+  varints, and variants, optionals, vectors and maps are length- or
+  index-prefixed.
+- **The type universe is checked at compile time.** `Wire<T>` refuses
+  floating point (a replica must compute bit-identical results on another
+  CPU), pointers and unscoped enums.
+- **Decoding is total and encoding canonical.** Every byte string either
+  decodes to a valid value or is refused with a reason:
+  - an enum past its last enumerator is refused (its count is read off the
+    compiler, `i4/base/enum.hpp`);
+  - so is a variant index past its last alternative;
+  - so is any value a refinement type's `valid()` rejects;
+  - a count that couldn't fit in the remaining bytes is refused before any
+    allocation.
+
+  Whatever decodes re-encodes to the same bytes. A 200k-input byte fuzzer
+  checks this.
+- **A fingerprint of the protocol's shape** (`link::protocol`) changes when
+  any field or enumerator anywhere in it changes. A mismatched build is
+  refused at Hello instead of misreading messages.
+
+`link::Replica` keeps two states:
+
+- `confirmed`: the server's state at the last applied event.
+- `shown`: confirmed, plus this head's requests the server hasn't answered
+  yet.
+
+A keypress is applied to `shown` in the same frame. When the server's
+events arrive, `shown` is rebuilt from `confirmed`. If nothing interleaved,
+the rebuild equals the prediction and nothing moves. If something did, the
+rebuild is the correction. This is why `wm::State` holds no floats: window
+weights are 20-bit fixed-point `Share`s, so `apply()` agrees bit for bit on
+every machine.
+
+`tests/test_replica.cpp` checks convergence. It runs three heads and one
+server with random delays in both directions, server-side events
+interleaving, and every message encoded and decoded along the way. After
+the network drains, every head equals the server exactly.
+
+## The head draws on mayag
+
+`src/head/` turns the replica into frames:
+
+- `keys.hpp` maps mayag's physical keys to i3 keysym names with an
+  exhaustive switch. Bindings are therefore portable data, and a head on
+  macOS reads the same table as one on Linux.
+- `scene.cpp` gives every tile a spring (`mayag::Animated`, fixed-step) that
+  chases its arranged rectangle, and renders the frame with mayag's DSL.
+  Springs exist only in the head; the window manager never sees a float.
+
+`i4-preview` (`src/app/preview.cpp`) is the whole architecture in one window:
+server, link and head as a single jaal program. Every message is encoded,
+delayed by a simulated network (F1 cycles 0/50/150/400 ms) and decoded. At
+400 ms, focus and moves still land in the frame you pressed the key, while
+the bar counts requests in flight. `i4-preview --headless` runs the same
+program under ctest. There are no Wayland clients yet, so `exec` opens a
+stand-in tile.
 
 ## Types do the checking
 
@@ -113,10 +182,11 @@ version available, and only after review:
 
 - **jaal** (runtime: event loop, typed Elm programs, effects). Pulled in as
   `third_party/mayag/third_party/jaal`, since mayag requires it, at the
-  latest upstream commit.
-- **mayag** (renderer). `third_party/mayag`, latest upstream. It becomes the
-  head's renderer once it can import foreign buffers; see
-  `third_party/mayag/docs/compositor-substrate.md`.
+  latest upstream commit. `i4-preview` is a jaal program.
+- **mayag** (renderer). `third_party/mayag`, latest upstream, built in-tree
+  as a SYSTEM dependency. The head draws with its DSL and animates with its
+  springs. Compositing client buffers still needs mayag to import foreign
+  memory (dmabuf); see `third_party/mayag/docs/compositor-substrate.md`.
 - **weft** → `i4/base/geom.hpp`: `Point`/`Size`/`Rect` over phantom spaces.
   weft's integer-only `Transform` was not taken, because fractional scaling
   needs something better.
@@ -125,10 +195,12 @@ version available, and only after review:
   tapestry's tree, which uses mutable nodes and per-node focus flags, was
   *not* taken. i4's `State` was redesigned around determinism and
   replication.
-- **loom** (Wayland in C++ with no libwayland, protocol versions checked at
-  compile time). This is the candidate for the `server` protocol layer, to
-  be ported onto the current jaal host API. Its jaal glue targets an older
-  jaal (`router`, an older `host_context`).
+- **loom** (Wayland in C++ with no libwayland; 106 protocol files, 954
+  interfaces generated, protocol versions checked at compile time). This is
+  the `server` layer's protocol substrate. Its core and server tests all
+  pass against the current jaal. Only `loom/jaal.hpp`, its event-loop glue,
+  still targets jaal's older `router`/`host_context` API, so i4 will write
+  that join itself.
 
 ## Building
 
@@ -136,7 +208,11 @@ version available, and only after review:
 cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 cmake --preset asan  && cmake --build --preset asan  && ctest --preset asan
 I4_FUZZ_SEEDS=500 ./build/release/tests/test_determinism   # deep fuzz
+I4_FUZZ_SEEDS=500 ./build/release/tests/test_replica
+./build/debug/i4-preview                                   # try it ($mod = Alt)
 ```
 
-Requirements: GCC 16 or another C++26 compiler, and CMake 3.29 or newer.
-The `wm` layer has no other dependencies.
+Requirements: GCC 16 or Clang 23 (C++26 structured-binding packs), and
+CMake 3.29 or newer. `wm` and `link` have no other dependencies. The head
+needs nothing at build time either, because mayag loads Wayland and Vulkan
+with dlopen.

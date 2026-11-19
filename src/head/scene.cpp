@@ -1,0 +1,126 @@
+// src/head/scene.cpp — springs, and the frame as mayag nodes.
+#include "scene.hpp"
+
+#include <algorithm>
+
+namespace i4::head {
+
+using namespace mayag;
+using namespace mayag::dsl;
+
+namespace {
+
+// Catppuccin Mocha, mauve accent.
+constexpr auto crust = rgb<0x11111b>;
+constexpr auto mantle = rgb<0x181825>;
+constexpr auto base = rgb<0x1e1e2e>;
+constexpr auto surface0 = rgb<0x313244>;
+constexpr auto surface1 = rgb<0x45475a>;
+constexpr auto overlay0 = rgb<0x6c7086>;
+constexpr auto subtext = rgb<0xa6adc8>;
+constexpr auto text_c = rgb<0xcdd6f4>;
+constexpr auto mauve = rgb<0xcba6f7>;
+constexpr auto peach = rgb<0xfab387>;
+constexpr auto green = rgb<0xa6e3a1>;
+
+constexpr Spring motion_spring{260.0f, 30.0f};
+
+Vec4 vec(Rect<space::Desktop> r) {
+    return {static_cast<float>(r.left()), static_cast<float>(r.top()), static_cast<float>(r.size.width),
+            static_cast<float>(r.size.height)};
+}
+
+Node tile(const wm::Tile& t, Vec4 at, const std::string& label) {
+    const float inset = 3.0f;  // a hair of desktop between tiles
+    const auto accent = t.focused ? mauve : surface1;
+    return (v(text_owned(label) | font(13) | semibold | fg(t.focused ? text_c : subtext) | ellipsis,
+              text_owned(t.layer == wm::Layer::floating ? std::string("floating") : std::string()) | font(11) |
+                  fg(overlay0))
+            | gap(4) | pad(10, 12)
+            | absolute(at.x + inset, at.y + bar_height + inset)
+            | size(std::max(0.0f, at.z - 2 * inset), std::max(0.0f, at.w - 2 * inset))
+            | bg(t.focused ? surface0 : base) | border(2, accent) | radius(8)
+            | shadow(t.layer == wm::Layer::floating ? 24.0f : 8.0f, crust.fade(0.6f))
+            | clip)
+        .build();
+}
+
+Node title(const wm::Title& t) {
+    const auto r = vec(t.rect);
+    return (h(text_owned(t.text) | font(11) | fg(t.active ? text_c : overlay0) | ellipsis)
+            | pad(0, 8) | align(Align::center)
+            | absolute(r.x + 3, r.y + bar_height + 3) | size(std::max(0.0f, r.z - 6), std::max(0.0f, r.w - 3))
+            | bg(t.active ? (t.focused ? mauve.fade(0.25f) : surface0) : mantle) | radius(6))
+        .build();
+}
+
+Node bar(const Hud& hud) {
+    std::vector<Node> ws;
+    for (const auto& name : hud.workspaces) {
+        const bool on = name == hud.focused_workspace;
+        ws.push_back((h(text_owned(name) | font(12) | bold | fg(on ? crust : subtext))
+                      | pad(2, 10) | radius(6) | bg(on ? mauve : surface0))
+                         .build());
+    }
+    const auto net = hud.latency_ms == 0
+                         ? std::string("local")
+                         : std::to_string(hud.latency_ms) + " ms link · " + std::to_string(hud.in_flight) +
+                               " in flight · " + std::to_string(hud.corrections) + " corrected";
+    return (h(h_list(std::move(ws), 6.0f),
+              box() | grow(),
+              text_owned(net) | font(12) | fg(hud.latency_ms == 0 ? green : peach),
+              text_owned("  F1 latency · " + hud.mod_name + "+Return open · " + hud.mod_name + "+Shift+q close")
+                  | font(12) | fg(overlay0))
+            | align(Align::center) | pad(0, 10) | absolute(0, 0) | width(pct(100)) | height(bar_height)
+            | bg(mantle))
+        .build();
+}
+
+}  // namespace
+
+void Motion::retarget(const wm::Arrangement& a) {
+    std::map<wm::WindowId, Moving> next;
+    for (const auto& sc : a.screens)
+        for (const auto& t : sc.tiles) {
+            const auto target = vec(t.frame);
+            auto it = frames_.find(t.window);
+            Moving m = it != frames_.end() ? std::move(it->second) : [&] {
+                Moving fresh;
+                fresh.snap({target.x + target.z / 2, target.y + target.w / 2, 0.0f, 0.0f});
+                return fresh;
+            }();
+            m.to(target);
+            next.emplace(t.window, std::move(m));
+        }
+    frames_ = std::move(next);
+}
+
+void Motion::step(double dt) {
+    for (auto& [w, m] : frames_) m.step(dt, motion_spring);
+}
+
+bool Motion::animating() const {
+    return std::ranges::any_of(frames_, [](const auto& kv) { return kv.second.animating(); });
+}
+
+std::optional<Vec4> Motion::at(wm::WindowId w) const {
+    auto it = frames_.find(w);
+    if (it == frames_.end()) return std::nullopt;
+    return it->second.value();
+}
+
+Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud) {
+    std::vector<Node> layers;
+    for (const auto& sc : a.screens) {
+        for (const auto& t : sc.tiles) {
+            const auto at = motion.at(t.window).value_or(vec(t.frame));
+            layers.push_back(tile(t, at, t.label));
+        }
+        for (const auto& ti : sc.titles)
+            if (ti.rect.size.height > 0) layers.push_back(title(ti));
+    }
+    layers.push_back(bar(hud));
+    return (v_list(std::move(layers)) | width(pct(100)) | height(pct(100)) | bg(crust)).build();
+}
+
+}  // namespace i4::head

@@ -45,19 +45,36 @@ add_library(i4_wm STATIC
     src/wm/tree.cpp
     src/wm/apply.cpp
     src/wm/arrange.cpp
+    src/wm/bindings.cpp
     src/wm/parse.cpp
     src/wm/shape.cpp)
 target_link_libraries(i4_wm PUBLIC i4::base PRIVATE i4_warnings)
 add_library(i4::wm ALIAS i4_wm)
 
-# -- server / head --------------------------------------------------------------
-# Not yet. They will pull in third_party/mayag, which brings jaal (the
-# runtime) with it as third_party/mayag/third_party/jaal:
-#
-#   add_subdirectory(third_party/mayag EXCLUDE_FROM_ALL)
-#
-# The wm layer must never depend on either: it is what the head runs to
-# predict, and what tests run with nothing else present.
+# -- link ---------------------------------------------------------------------
+# The codec is header-only (it is all templates); the replica is not.
+add_library(i4_link STATIC src/link/predict.cpp)
+target_link_libraries(i4_link PUBLIC i4::wm PRIVATE i4_warnings)
+add_library(i4::link ALIAS i4_link)
+
+# -- head + preview ---------------------------------------------------------------
+# mayag (and through it jaal, the runtime) is vendored. SYSTEM: i4's warning
+# flags are for i4's code, not for a dependency's headers.
+option(I4_WITH_HEAD "Build the mayag head and i4-preview" ON)
+if(I4_WITH_HEAD)
+    set(MAYAG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(MAYAG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/mayag EXCLUDE_FROM_ALL SYSTEM)
+
+    add_library(i4_head STATIC src/head/scene.cpp)
+    target_link_libraries(i4_head PUBLIC i4::link mayag::mayag PRIVATE i4_warnings)
+
+    add_executable(i4-preview src/app/preview.cpp)
+    target_link_libraries(i4-preview PRIVATE i4_head i4_warnings)
+endif()
+
+# The Wayland server (i4d) comes next, on loom; it will sit beside the head
+# at the same layer rank and meet it only through link.
 
 if(I4_BUILD_TESTS)
     enable_testing()

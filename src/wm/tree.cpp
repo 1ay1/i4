@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <climits>
-#include <cmath>
 #include <set>
 #include <utility>
 
@@ -27,14 +26,27 @@ void move_to_front(std::vector<T>& v, const T& x) {
     std::rotate(v.begin(), it, it + 1);
 }
 
-void renormalise(std::vector<double>& weights) {
-    double sum = 0.0;
-    for (double w : weights) sum += w;
-    if (sum <= 0.0) {
-        for (double& w : weights) w = 1.0 / static_cast<double>(weights.size());
-        return;
+/// Make `w` sum to exactly `whole`, every share positive, keeping the
+/// proportions as closely as integers allow. The rounding remainder goes to
+/// the largest share (the first, on a tie), which is where one part is least
+/// visible and which every replica picks the same way.
+void rebalance(std::vector<Share>& w) {
+    if (w.empty()) return;
+    std::uint64_t sum = 0;
+    for (Share& x : w) {
+        x = std::max<Share>(x, 1);
+        sum += x;
     }
-    for (double& w : weights) w /= sum;
+    std::uint64_t total = 0;
+    for (Share& x : w) {
+        x = std::max<Share>(1, static_cast<Share>(std::uint64_t{x} * whole / sum));
+        total += x;
+    }
+    auto& big = *std::ranges::max_element(w);
+    if (total < whole)
+        big += static_cast<Share>(whole - total);
+    else
+        big -= static_cast<Share>(total - whole);
 }
 
 std::pair<int, std::string> order_key(const Workspace& w) {
@@ -227,10 +239,12 @@ void insert(State& s, ConId parent_id, std::size_t index, ConId child) {
 
     auto& sp = split(s, parent_id);
     expect(index <= sp.children.size(), "insert position in range");
-    const double share = 1.0 / static_cast<double>(sp.children.size() + 1);
-    for (double& w : sp.weights) w *= 1.0 - share;
+    // An equal share for the newcomer; the others give it up in proportion.
+    const auto share = static_cast<Share>(whole / (sp.children.size() + 1));
+    for (Share& w : sp.weights) w = static_cast<Share>(std::uint64_t{w} * (whole - share) / whole);
     sp.children.insert(sp.children.begin() + static_cast<std::ptrdiff_t>(index), child);
     sp.weights.insert(sp.weights.begin() + static_cast<std::ptrdiff_t>(index), share);
+    rebalance(sp.weights);
     sp.mru.push_back(child);
 }
 
@@ -265,7 +279,7 @@ std::optional<ConId> unlink(State& s, ConId c) {
             sp.children.erase(sp.children.begin() + static_cast<std::ptrdiff_t>(i));
             sp.weights.erase(sp.weights.begin() + static_cast<std::ptrdiff_t>(i));
             erase_value(sp.mru, c);
-            if (!sp.weights.empty()) renormalise(sp.weights);
+            rebalance(sp.weights);
             return ch.parent;
         });
 }
@@ -286,13 +300,15 @@ void splice(State& s, ConId g, ConId k) {
     if (inner.layout != gs.layout || shows_one_child(inner.layout)) return;
 
     const auto i = index_in(gs, k);
-    const double share = gs.weights[i];
+    const Share share = gs.weights[i];
     gs.children.erase(gs.children.begin() + static_cast<std::ptrdiff_t>(i));
     gs.weights.erase(gs.weights.begin() + static_cast<std::ptrdiff_t>(i));
     gs.children.insert(gs.children.begin() + static_cast<std::ptrdiff_t>(i), inner.children.begin(),
                        inner.children.end());
     for (std::size_t j = 0; j < inner.weights.size(); ++j)
-        gs.weights.insert(gs.weights.begin() + static_cast<std::ptrdiff_t>(i + j), inner.weights[j] * share);
+        gs.weights.insert(gs.weights.begin() + static_cast<std::ptrdiff_t>(i + j),
+                          static_cast<Share>(std::uint64_t{inner.weights[j]} * share / whole));
+    rebalance(gs.weights);
 
     auto at = std::ranges::find(gs.mru, k);
     const auto m = at - gs.mru.begin();
@@ -468,12 +484,12 @@ std::expected<void, std::string> check(const State& s) {
             I4_REQUIRE(root || !sp.children.empty(), here + "empty split survived");
             I4_REQUIRE(sp.weights.size() == sp.children.size(), here + "weights and children differ in length");
             I4_REQUIRE(same_set(sp.children, sp.mru), here + "mru is not a permutation of children");
-            double sum = 0.0;
-            for (double v : sp.weights) {
-                I4_REQUIRE(v > 0.0, here + "a child has no share");
+            std::uint64_t sum = 0;
+            for (Share v : sp.weights) {
+                I4_REQUIRE(v > 0, here + "a child has no share");
                 sum += v;
             }
-            I4_REQUIRE(sp.children.empty() || std::abs(sum - 1.0) < 1e-6, here + "weights do not sum to 1");
+            I4_REQUIRE(sp.children.empty() || sum == whole, here + "shares do not sum to whole");
             for (ConId ch : sp.children) {
                 I4_REQUIRE(s.cons.contains(ch), here + "missing child");
                 const auto* place = std::get_if<Child>(&s.cons.at(ch).place);

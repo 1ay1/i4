@@ -28,7 +28,7 @@
 //   * Output, Workspace, Con and Window ids are distinct types.
 //
 // What the types cannot enforce (parent/child agreement, focus stacks being
-// permutations of children, weights summing to 1) is checked by check(),
+// permutations of children, shares summing to whole) is checked by check(),
 // which every test runs after every single step.
 
 #include <cstdint>
@@ -54,6 +54,16 @@ using ConId = Id<struct ConTag>;
 using WindowId = Id<struct WindowTag>;
 
 // -- vocabulary ----------------------------------------------------------------
+
+/// A child's share of its split's axis, in parts of `whole`.
+///
+/// Integers, not doubles, and that is a correctness decision rather than a
+/// performance one: a head predicts by running apply() itself, possibly on
+/// another CPU built by another compiler. Floating point is allowed to differ
+/// there (an fma contracted on ARM, not on x86) and a replica that differs by
+/// one ulp differs forever. Integer arithmetic is the same everywhere.
+using Share = std::uint32_t;
+inline constexpr Share whole = Share{1} << 20;
 
 /// How a Split arranges its children. i3's four layouts.
 enum class Layout : std::uint8_t { splith, splitv, tabbed, stacking };
@@ -139,8 +149,9 @@ struct Split {
     Layout last_split = Layout::splith;
     /// In order, left-to-right or top-to-bottom.
     std::vector<ConId> children;
-    /// Each child's share of the split axis, parallel to children; sums to 1.
-    std::vector<double> weights;
+    /// Each child's share of the split axis, parallel to children. Every one
+    /// is positive and they sum to exactly `whole`.
+    std::vector<Share> weights;
     /// The same children, most recently focused first. Descending through
     /// mru heads from the workspace is where focus is.
     std::vector<ConId> mru;

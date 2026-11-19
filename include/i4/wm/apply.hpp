@@ -26,16 +26,17 @@ namespace i4::wm {
 // -- events: what happened ----------------------------------------------------
 
 namespace ev {
-struct OutputAdded { OutputInfo info; };
-struct OutputChanged { OutputInfo info; };  // matched by name
-struct OutputRemoved { std::string name; };
-struct WindowMapped { WindowId id; WindowInfo info; };
-struct WindowChanged { WindowId id; WindowInfo info; };
-struct WindowUnmapped { WindowId id; };
+struct OutputAdded { OutputInfo info; friend bool operator==(const OutputAdded&, const OutputAdded&) = default; };
+/// Matched by name.
+struct OutputChanged { OutputInfo info; friend bool operator==(const OutputChanged&, const OutputChanged&) = default; };
+struct OutputRemoved { std::string name; friend bool operator==(const OutputRemoved&, const OutputRemoved&) = default; };
+struct WindowMapped { WindowId id; WindowInfo info; friend bool operator==(const WindowMapped&, const WindowMapped&) = default; };
+struct WindowChanged { WindowId id; WindowInfo info; friend bool operator==(const WindowChanged&, const WindowChanged&) = default; };
+struct WindowUnmapped { WindowId id; friend bool operator==(WindowUnmapped, WindowUnmapped) = default; };
 /// A click, or xdg-activation: focus this window.
-struct WindowActivated { WindowId id; };
-struct Run { Script script; };
-struct Configure { Settings settings; };
+struct WindowActivated { WindowId id; friend bool operator==(WindowActivated, WindowActivated) = default; };
+struct Run { Script script; friend bool operator==(const Run&, const Run&) = default; };
+struct Configure { Settings settings; friend bool operator==(const Configure&, const Configure&) = default; };
 }  // namespace ev
 
 using Event = std::variant<ev::OutputAdded, ev::OutputChanged, ev::OutputRemoved,

@@ -2,7 +2,6 @@
 #include "i4/wm/arrange.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <map>
 #include <span>
 
@@ -47,18 +46,25 @@ namespace {
 /// once, on the running edge, never per child. Rounding each share on its own
 /// loses up to n-1 pixels and leaves a line of desktop between two windows
 /// that moves as windows come and go. Here the shares always sum to total.
-std::vector<std::int32_t> divide(std::int32_t total, std::span<const double> weights) {
+/// All integer, so every head computes the same pixels.
+std::vector<std::int32_t> divide(std::int32_t total, std::span<const Share> weights) {
     std::vector<std::int32_t> out(weights.size(), 0);
     if (weights.empty() || total <= 0) return out;
-    double edge = 0.0;
+    std::uint64_t edge = 0;
     std::int32_t used = 0;
     for (std::size_t i = 0; i + 1 < weights.size(); ++i) {
         edge += weights[i];
-        const auto at = static_cast<std::int32_t>(std::lround(edge * total));
+        const auto at = static_cast<std::int32_t>((edge * static_cast<std::uint64_t>(total) + whole / 2) / whole);
         out[i] = std::clamp(at - used, 0, total - used);
         used += out[i];
     }
     out.back() = total - used;
+    return out;
+}
+
+std::vector<Share> equal_shares(std::size_t n) {
+    std::vector<Share> out(n, static_cast<Share>(whole / n));
+    out.front() += static_cast<Share>(whole - out.front() * n);
     return out;
 }
 
@@ -81,7 +87,8 @@ struct Builder {
     /// (not under a tab). `bare`: fullscreen, no decoration at all.
     void leaf(Screen* screen, ConId c, WindowId window, Rect<Desktop> frame, Layer layer, bool titled, bool bare) {
         frames[c] = frame;
-        const Tile tile{window, c, frame, bare ? frame : tree::undecorated(s.settings, frame, titled), layer, lit(c)};
+        const Tile tile{window, c, frame, bare ? frame : tree::undecorated(s.settings, frame, titled), layer, lit(c),
+                        label(c)};
         if (screen == nullptr) {
             out.hidden.push_back(tile);
             return;
@@ -132,8 +139,7 @@ struct Builder {
                 // one visible child. The rest keep the same size, hidden.
                 const bool tabbed = sp.layout == Layout::tabbed;
                 const auto bar = std::min(r.size.height, tabbed ? th : th * n);
-                const std::vector<double> equal(sp.children.size(), 1.0 / n);
-                const auto widths = divide(r.size.width, equal);
+                const auto widths = divide(r.size.width, equal_shares(sp.children.size()));
                 const ConId shown = sp.mru.front();
                 const Rect<Desktop> body{r.left(), r.top() + bar, r.size.width, r.size.height - bar};
                 auto x = r.left();

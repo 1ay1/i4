@@ -310,7 +310,7 @@ void wrap_root(State& s, ConId root) {
     for (ConId ch : r.children) con(s, ch).place = Child{w};
     auto& rs = split(s, root);
     rs.children = {w};
-    rs.weights = {1.0};
+    rs.weights = {whole};
     rs.mru = {w};
 }
 
@@ -539,7 +539,7 @@ Result act(State& s, const cmd::SplitCon& c, Outcome&) {
     Split inner;
     inner.layout = inner.last_split = layout;
     inner.children = {f};
-    inner.weights = {1.0};
+    inner.weights = {whole};
     inner.mru = {f};
     const auto w = create_con(s, con(s, f).workspace, Child{p}, std::move(inner));
     auto& ps = split(s, p);
@@ -658,14 +658,15 @@ Result act(State& s, const cmd::Resize& c, Outcome&) {
     for (ConId cur = f; auto p = parent(s, cur); cur = *p) {
         auto& sp = split(s, *p);
         if (shows_one_child(sp.layout) || axis_of(sp.layout) != c.axis || sp.children.size() < 2) continue;
-        constexpr double smallest = 0.05;
+        constexpr Share smallest = whole / 20;
         const auto i = index_in(sp, cur);
         const auto j = i + 1 < sp.children.size() ? i + 1 : i - 1;
-        const double pair = sp.weights[i] + sp.weights[j];
-        if (pair <= 2 * smallest) return fail("too small to resize");
-        const double want = sp.weights[i] + (c.grow ? 1.0 : -1.0) * c.points / 100.0;
-        sp.weights[i] = std::clamp(want, smallest, pair - smallest);
-        sp.weights[j] = pair - sp.weights[i];
+        const std::int64_t pair = std::int64_t{sp.weights[i]} + sp.weights[j];
+        if (pair <= 2 * std::int64_t{smallest}) return fail("too small to resize");
+        const std::int64_t delta = std::int64_t{whole} * c.points / 100;
+        const std::int64_t want = sp.weights[i] + (c.grow ? delta : -delta);
+        sp.weights[i] = static_cast<Share>(std::clamp<std::int64_t>(want, smallest, pair - smallest));
+        sp.weights[j] = static_cast<Share>(pair - sp.weights[i]);
         return {};
     }
     return fail("nothing to resize along that axis");
