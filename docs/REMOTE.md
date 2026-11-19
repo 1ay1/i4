@@ -49,12 +49,21 @@ Video is decoded by VideoToolbox (the Mac's hardware decoder). `I4_HEAD_TRACE=1`
 prints each frame (codec, decoder, bytes, decode time) and key->photon
 latency.
 
-## What it costs (measured, release build, kitty, 40 keys)
+## What it costs (measured, release build, kitty, 40 keys, head fullscreen)
 
 | path | key->photon p50 | p90 |
 |---|---|---|
-| local head (zero copy) | 18.4 ms | 22.3 ms |
-| network head (direct, encrypted, GPU video) | 21.8 ms | 34.4 ms |
+| local head (zero copy) | 3.8 ms | 4.1 ms |
+| network head (direct, encrypted) | 4.8 ms | 5.5 ms |
 
-Encode 1.5 ms (NVENC), decode ~2 ms; a keystroke's frame is ~100-400 bytes.
-Add your network's one-way latency on top.
+How: i4d compares each frame with the last one ON THE GPU (64 px tiles). A
+few changed tiles (typing, a cursor, a hover) are read off the GPU and sent
+losslessly, ~570 bytes per keystroke; the head pastes them into its texture
+in place (0.4 ms). Big changes (scrolling, video) go as NVENC HEVC 4:4:4
+lossless. Add your network's one-way latency on top.
+
+For the lowest latency run the head fullscreen: `i4-head --fullscreen` (or
+`I4_FULLSCREEN=1`). The host compositor then scans the head's buffer out
+directly instead of compositing it, which is most of the difference between
+~18 ms windowed and ~4 ms fullscreen. Frames are presented without waiting
+for vblank by default (`--vsync` / `I4_VSYNC=1` for tear-free).
