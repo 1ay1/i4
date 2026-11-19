@@ -81,7 +81,8 @@ Cmd Head::update(Model& m, Heard h) {
         // the client's memory is free again at once. A frame that came over
         // the network was released and paced by the session when it sent it:
         // nothing goes back.
-        const bool remote = std::holds_alternative<link::down::Encoded>(c->layout);
+        const bool remote = std::holds_alternative<link::down::Encoded>(c->layout) ||
+                            std::holds_alternative<link::down::Video>(c->layout);
         const auto tex = texture_of(c->window);
         if (h.texture != 0) {
             m.textures[c->window] = h.texture;
@@ -138,8 +139,9 @@ Cmd Head::update(Model&, GpuReady g) {
     // a remote head offers none: clients draw to shm. (Native speed for GPU
     // clients needs the read on the GPU: an encoder next to the session.)
     if (!options.zero_copy || options.remote) g.formats.clear();
-    std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts\n", g.formats.size());
-    return say(link::up::Caps{std::move(g.formats)});
+    std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts%s\n", g.formats.size(),
+                 options.remote ? ", frames as video" : "");
+    return say(link::up::Caps{std::move(g.formats), options.remote});
 }
 
 Cmd Head::update(Model& m, Lost) {

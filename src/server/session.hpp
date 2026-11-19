@@ -36,6 +36,8 @@ struct Session {
         /// What it can sample in place (up::Caps); empty until it says.
         std::vector<link::up::Format> formats;
         bool caps_known = false;
+        /// It takes frames as video (a head across a network).
+        bool video = false;
         /// Per window: the newest generation it has released.
         std::map<wm::WindowId, std::uint64_t> released;
         /// Keys it has pressed and not released: let go of if it leaves,
@@ -67,8 +69,11 @@ struct Session {
         };
         std::map<LaunchId, Launch> launches;
         std::uint64_t maps = 0;
-        /// What clients were last offered (so a change is announced once).
-        std::vector<link::up::Format> offered;
+        /// What clients were last offered (so a change is announced once):
+        /// the formats every sampling head shares (nullopt: no such head),
+        /// and whether a video head needs the session's GPU to encode them.
+        std::optional<std::vector<link::up::Format>> offered;
+        bool offered_video = false, offered_once = false;
         /// How the pointer looks now; every head shows it, new ones at once.
         link::down::Cursor cursor;
     };

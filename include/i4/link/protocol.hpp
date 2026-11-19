@@ -146,6 +146,10 @@ struct Format {
 /// into a buffer the presenter can scan or sample as it is.
 struct Caps {
     std::vector<Format> formats;
+    /// It takes frames as video (down::Video): clients may render into any
+    /// layout the SESSION's GPU can encode from, not only what this head
+    /// could sample (a remote head samples nothing).
+    bool video = false;
     friend bool operator==(const Caps&, const Caps&) = default;
 };
 }  // namespace up
@@ -222,6 +226,16 @@ struct Encoded {
     [[nodiscard]] bool valid() const { return tile >= 8 && tile <= 512 && raw_size <= (256u << 20); }
     friend bool operator==(const Encoded&, const Encoded&) = default;
 };
+/// A frame encoded on the session's GPU (NVENC), for a head across a
+/// network: the client's GPU buffer never touches a CPU on either side.
+/// `data` is the codec's Annex-B access unit(s); `keyframe` decodes alone.
+enum class Codec : std::uint8_t { h264, hevc };
+struct Video {
+    Codec codec = Codec::hevc;
+    bool keyframe = false;
+    std::string data;
+    friend bool operator==(const Video&, const Video&) = default;
+};
 /// A frame is sent only once it is READY: a client using explicit sync
 /// (linux-drm-syncobj) has its acquire point waited for by the session, and
 /// its release point signalled by the session once every head has released
@@ -231,7 +245,7 @@ struct Content {
     wm::WindowId window;
     std::uint64_t generation;
     Size<space::Buffer> size;
-    std::variant<ShmLayout, DmabufLayout, Encoded> layout;
+    std::variant<ShmLayout, DmabufLayout, Encoded, Video> layout;
     friend bool operator==(const Content&, const Content&) = default;
 };
 /// What can be launched on the session's machine (its .desktop files).

@@ -69,20 +69,30 @@ std::uint64_t released_by_all(const Model& m, wm::WindowId w) {
 /// Offer clients the GPU layouts every head that has said can sample in
 /// place (each fourcc+modifier in all of them). A head that has not sent
 /// its caps yet does not narrow the offer; with none known nothing changes.
+/// A head that takes video (remote) does not sample buffers: it narrows the
+/// offer to what the session's own GPU can encode from (the host knows).
 void offer(Model& m, std::vector<Cmd>& out) {
     std::optional<std::vector<link::up::Format>> common;
+    bool video = false, known = false;
     for (const auto& [id, h] : m.heads) {
         if (!h.welcomed || !h.caps_known) continue;
+        known = true;
+        if (h.video) {
+            video = true;
+            continue;
+        }
         if (!common) {
             common = h.formats;
             continue;
         }
         std::erase_if(*common, [&](const auto& f) { return std::ranges::find(h.formats, f) == h.formats.end(); });
     }
-    if (!common) return;
-    if (*common == m.offered) return;
-    m.offered = std::move(*common);
-    out.push_back(fx::Formats{m.offered});
+    if (!known) return;
+    if (common == m.offered && video == m.offered_video && m.offered_once) return;
+    m.offered = std::move(common);
+    m.offered_video = video;
+    m.offered_once = true;
+    out.push_back(fx::Formats{m.offered, video});
 }
 
 /// The window under a desktop point, top-most first, and the point in it.
@@ -292,6 +302,7 @@ Cmd Session::update(Model& m, ev::HeadSaid e) {
     if (reply.caps) {
         auto& h = m.heads[e.head];
         h.formats = std::move(reply.caps->formats);
+        h.video = reply.caps->video;
         h.caps_known = true;
         offer(m, out);
     }

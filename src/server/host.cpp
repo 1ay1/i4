@@ -141,7 +141,7 @@ void Host::accept_head(const transport::Fd& listener) {
     const auto id = next_head_;
     next_head_ = next_head_.next();
     if (ch->remote()) std::fprintf(stderr, "i4d: head %u connected over the network\n", id.value);
-    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}};
+    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}, false, {}};
     if (auto r = watch_(h.channel.fd(), jaal::interest::read, kHeadBase + id.value)) h.reg.emplace(std::move(*r));
     heads_.emplace(id, std::move(h));
     emit(ev::HeadJoined{id});
@@ -163,6 +163,7 @@ void Host::read_head(HeadId id) {
             drop_head(id);
             return;
         }
+        if (const auto* caps = std::get_if<link::up::Caps>(&*up)) it->second.video = caps->video && it->second.channel.remote();
         emit(ev::HeadSaid{id, std::move(*up)});
         if (!heads_.contains(id)) return;  // the program dropped it
     }
@@ -293,6 +294,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
     const auto gen = s->toplevel->generation;
     const auto t0 = std::chrono::steady_clock::now();
     std::optional<link::down::Encoded> enc;
+    std::optional<link::down::Video> video;
     link::down::Content c{window, gen, {}, link::down::ShmLayout{}};
     match(
         b->second,
@@ -305,6 +307,16 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
                                  {m.bytes(), buf.width, buf.height, buf.offset, buf.stride, buf.format == F::argb8888});
         },
         [&](const DmabufBuffer& buf) {
+            if (h.video && encoder_.available()) {
+                // On the GPU, start to finish: no CPU ever reads it.
+                DmabufFrame f{buf.id, buf.width, buf.height, buf.fourcc, buf.modifier, {}};
+                for (const auto& p : buf.planes) f.planes.push_back({p.fd->get(), p.offset, p.stride});
+                auto& stream = h.streams[window];
+                if (!stream) stream = encoder_.stream();
+                c.size = {buf.width, buf.height};
+                video = encoder_.encode(*stream, f);
+                return;
+            }
             // A LINEAR single-plane 8888 buffer reads straight from the CPU:
             // a remote head asks clients for exactly that, so they keep
             // rendering on the GPU. The read is bracketed by DMA_BUF_IOCTL_SYNC
@@ -325,7 +337,27 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
             sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
             (void)::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
         });
-    if (!enc) return;
+    if (video) {
+        if (static const bool trace = std::getenv("I4D_TRACE") != nullptr; trace)
+            std::fprintf(stderr, "i4d: video encode %dx%d  %s %zu bytes  %.3f ms\n", c.size.width, c.size.height,
+                         video->keyframe ? "key" : "delta", video->data.size(),
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        c.layout = std::move(*video);
+        if (!h.channel.send(link::encode(link::Down{c}))) {
+            drop_head(id);
+            return;
+        }
+        emit(ev::HeadSaid{id, link::up::Released{window, gen}});
+        emit(ev::HeadSaid{id, link::up::Shown{window, gen}});
+        return;
+    }
+    if (!enc) {
+        // Could not be read or encoded: the head keeps its last frame, but
+        // the client must never wait on a frame that will not be shown.
+        emit(ev::HeadSaid{id, link::up::Released{window, gen}});
+        emit(ev::HeadSaid{id, link::up::Shown{window, gen}});
+        return;
+    }
     if (static const bool trace = std::getenv("I4D_TRACE") != nullptr; trace)
         std::fprintf(stderr, "i4d: remote encode %dx%d  %zu tiles  %zu bytes  %.3f ms\n", c.size.width, c.size.height,
                      enc->tiles.size(), enc->data.size(),

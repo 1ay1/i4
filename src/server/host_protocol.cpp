@@ -797,7 +797,17 @@ void Host::rebuild_format_table() {
 }
 
 void Host::handle(const fx::Formats& e) {
-    formats_ = e.formats;
+    // Sampling heads' common layouts, narrowed (for video heads) to what
+    // this GPU's encoder can import; with only video heads, the encoder's.
+    if (e.video && encoder_.available()) {
+        const auto enc = encoder_.formats();
+        formats_ = e.formats ? *e.formats : enc;
+        std::erase_if(formats_, [&](const auto& f) { return std::ranges::find(enc, f) == enc.end(); });
+    } else if (e.video) {
+        formats_.clear();  // no encoder: a video head is sent shm tiles
+    } else {
+        formats_ = e.formats.value_or(std::vector<link::up::Format>{});
+    }
     rebuild_format_table();
     // linux-dmabuf exists exactly while some head can show GPU buffers. With
     // none, an app that bound it would allocate a layout nobody can sample;
@@ -903,7 +913,11 @@ void Host::bind_dmabuf(srv::Client& client, std::uint32_t version, id_t id) {
         auto adopt = [this, &client](srv::NewObject<wl_buffer> nb, DmabufBuffer b) {
             buffers_[{&client, nb.id()}] = std::move(b);
             auto bl = std::make_shared<srv::RequestListener<wl_buffer>>();
-            bl->on<wl_buffer::requests::destroy>([this, &client, bid = nb.id()] { buffers_.erase({&client, bid}); });
+            bl->on<wl_buffer::requests::destroy>([this, &client, bid = nb.id()] {
+                if (auto it = buffers_.find({&client, bid}); it != buffers_.end())
+                    if (const auto* d = std::get_if<DmabufBuffer>(&it->second)) encoder_.forget(d->id);
+                buffers_.erase({&client, bid});
+            });
             nb.bind<1>(bl);
         };
         pl->on<zwp_linux_buffer_params_v1::requests::create_immed>(

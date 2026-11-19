@@ -29,6 +29,7 @@
 
 #include "../transport/channel.hpp"
 #include "../remote/tiles.hpp"
+#include "../remote/video.hpp"
 #include "head.hpp"
 #include "pixels.hpp"
 
@@ -89,8 +90,26 @@ public:
             auto d = link::decode<link::Down>(p.bytes);
             if (!d) continue;
             Heard h{std::move(*d), std::nullopt, 0};
-            if (const auto* c = std::get_if<link::down::Content>(&h.message);
-                c && std::holds_alternative<link::down::Encoded>(c->layout)) {
+            const auto* c = std::get_if<link::down::Content>(&h.message);
+            if (c && std::holds_alternative<link::down::Video>(c->layout)) {
+                // Across a network, encoded on the session's GPU: decoded here
+                // by this platform's hardware decoder.
+                const auto t0 = std::chrono::steady_clock::now();
+                auto& dec = decoders_[c->window];
+                if (!dec) dec = std::make_unique<remote::Decoder>();
+                const auto& v = std::get<link::down::Video>(c->layout);
+                if (auto pic = dec->decode(v, c->size.width, c->size.height)) {
+                    mayag::ImageData img;
+                    img.width = pic->width;
+                    img.height = pic->height;
+                    img.rgba = std::move(pic->rgba);
+                    h.pixels = jaal::shared<mayag::ImageData>::make(std::move(img));
+                }
+                if (trace_)
+                    std::fprintf(stderr, "i4-head: video frame %dx%d  %s %zu bytes  %s  %.3f ms\n", c->size.width,
+                                 c->size.height, v.keyframe ? "key" : "delta", v.data.size(), dec->name().c_str(),
+                                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            } else if (c && std::holds_alternative<link::down::Encoded>(c->layout)) {
                 // Across a network: changed tiles onto this window's canvas,
                 // converted to RGBA as they land; the canvas is the image.
                 const auto t0 = std::chrono::steady_clock::now();
@@ -371,6 +390,7 @@ private:
     /// A window is gone: its imported buffers go with it.
     void forget(wm::WindowId w) {
         canvases_.erase(w);
+        decoders_.erase(w);
         auto it = windows_.find(w);
         if (it == windows_.end()) return;
         for (const auto& i : it->second.cache) window_.window().release_texture(i.texture);
@@ -407,6 +427,7 @@ private:
     };
     std::map<wm::WindowId, WindowGpu> windows_;
     std::map<wm::WindowId, remote::Canvas> canvases_;  // remote frames, as they stand
+    std::map<wm::WindowId, std::unique_ptr<remote::Decoder>> decoders_;  // remote video, per window
     std::uint32_t next_texture_ = 0x2000'0000u;
     std::vector<GpuDone> gpu_done_;
     bool gpu_busy_ = false;

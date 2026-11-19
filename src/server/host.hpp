@@ -39,6 +39,7 @@
 #include "../transport/channel.hpp"
 #include "../remote/tiles.hpp"
 #include "keyboard.hpp"
+#include "encoder.hpp"
 #include "syncobj.hpp"
 #include "vocab.hpp"
 
@@ -260,6 +261,10 @@ private:
         /// A window's newest frame, waiting while the link is backed up: a
         /// slow network skips frames instead of queueing stale ones.
         std::set<wm::WindowId> behind;
+        /// It takes video (up::Caps.video): GPU buffers go through the
+        /// encoder, one stream per window.
+        bool video = false;
+        std::map<wm::WindowId, Encoder::StreamPtr> streams;
     };
     /// Encode `window`'s content for remote head `id` and send it.
     void share_remote(HeadId id, HeadConn& h, wm::WindowId window);
@@ -345,6 +350,8 @@ private:
     // Declared before everything that can hold a Timeline (surfaces' staged
     // and held release points, timelines_): destroyed after them.
     Syncobjs syncobjs_;
+    /// Heads across a network: client GPU buffers to video, on the GPU.
+    Encoder encoder_;
     std::map<Key, std::unique_ptr<Surface>> surfaces_;
     std::map<Key, AnyBuffer> buffers_;
     std::map<Key, Params> params_;

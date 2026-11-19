@@ -102,8 +102,10 @@ struct FramesDone { wm::WindowId window; std::uint64_t generation; };
 /// go back to the client (wl_buffer.release), the current one excepted.
 struct Release { wm::WindowId window; std::uint64_t generation; };
 /// What clients should render into: the GPU buffer layouts every attached
-/// head can sample in place (linux-dmabuf feedback). Empty: shm only.
-struct Formats { std::vector<link::up::Format> formats; };
+/// head can sample in place (nullopt: no head samples), and whether a video
+/// head also needs them encodable by the session's GPU. The host intersects
+/// with what its encoder imports. Empty in the end: shm only.
+struct Formats { std::optional<std::vector<link::up::Format>> formats; bool video = false; };
 /// Disconnect a head that broke the protocol.
 struct Drop { HeadId head; };
 /// Start a process in the session (answered by ev::Launched).
