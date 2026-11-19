@@ -7,7 +7,9 @@
 #include <memory>
 
 #include <fcntl.h>
+#if defined(__linux__)
 #include <linux/sockios.h>
+#endif
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -16,9 +18,43 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+// Linux has these as flags; elsewhere (macOS) they are a fcntl / setsockopt.
+#ifndef SOCK_NONBLOCK
+#define I4_NO_SOCK_FLAGS 1
+#define SOCK_NONBLOCK 0
+#define SOCK_CLOEXEC 0
+#endif
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 namespace i4::transport {
 
 namespace {
+
+/// What SOCK_NONBLOCK / SOCK_CLOEXEC do at creation, after it (no-op on Linux).
+int flags(int fd, bool nonblock = true) {
+#ifdef I4_NO_SOCK_FLAGS
+    if (fd < 0) return fd;
+    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (nonblock) ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+#ifdef SO_NOSIGPIPE
+    const int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+#else
+    (void)nonblock;
+#endif
+    return fd;
+}
+
+int accept_nb(int listener) {
+#ifdef I4_NO_SOCK_FLAGS
+    return flags(::accept(listener, nullptr, nullptr));
+#else
+    return ::accept4(listener, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#endif
+}
 
 constexpr std::size_t max_fds = 8;
 
@@ -63,7 +99,11 @@ void tune(int fd) {
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
     const int idle = 10, interval = 5, count = 3;
+#if defined(TCP_KEEPIDLE)
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#elif defined(TCP_KEEPALIVE)
+    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle));  // macOS's name
+#endif
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
     const int buf = 8 << 20;
@@ -97,6 +137,8 @@ std::expected<std::pair<Channel, Channel>, ChannelError> Channel::pair() {
     int fds[2];
     if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) != 0)
         return std::unexpected(ChannelError::io);
+    flags(fds[0]);
+    flags(fds[1]);
     return std::pair{Channel{Fd{fds[0]}}, Channel{Fd{fds[1]}}};
 }
 
@@ -107,7 +149,7 @@ std::expected<Fd, ChannelError> Channel::listen(const std::string& path) {
         const auto ai = resolve(hp->first, hp->second, true);
         if (!ai) return std::unexpected(ChannelError::io);
         for (const addrinfo* a = ai.get(); a != nullptr; a = a->ai_next) {
-            Fd s{::socket(a->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
+            Fd s{flags(::socket(a->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0))};
             if (!s) continue;
             const int one = 1;
             ::setsockopt(s.get(), SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -121,7 +163,7 @@ std::expected<Fd, ChannelError> Channel::listen(const std::string& path) {
     }
     auto a = address(path);
     if (!a) return std::unexpected(a.error());
-    Fd s{::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
+    Fd s{flags(::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0))};
     if (!s) return std::unexpected(ChannelError::io);
     ::unlink(path.c_str());
     if (::bind(s.get(), reinterpret_cast<const sockaddr*>(&*a), sizeof(*a)) != 0 || ::listen(s.get(), 8) != 0)
@@ -130,7 +172,7 @@ std::expected<Fd, ChannelError> Channel::listen(const std::string& path) {
 }
 
 std::expected<Channel, ChannelError> Channel::accept(const Fd& listener) {
-    const int c = ::accept4(listener.get(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    const int c = accept_nb(listener.get());
     if (c < 0) return std::unexpected(ChannelError::io);
     return Channel{Fd{c}};
 }
@@ -142,7 +184,7 @@ std::expected<Channel, ChannelError> Channel::connect(const std::string& path) {
         const auto ai = resolve(hp->first, hp->second, false);
         if (!ai) return std::unexpected(ChannelError::closed);
         for (const addrinfo* a = ai.get(); a != nullptr; a = a->ai_next) {
-            Fd s{::socket(a->ai_family, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+            Fd s{flags(::socket(a->ai_family, SOCK_STREAM | SOCK_CLOEXEC, 0), false)};
             if (!s) continue;
             // Blocking connect (a head has nothing to do until it is
             // connected), then non-blocking like every other channel.
@@ -154,7 +196,7 @@ std::expected<Channel, ChannelError> Channel::connect(const std::string& path) {
     }
     auto a = address(path);
     if (!a) return std::unexpected(a.error());
-    Fd s{::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0)};
+    Fd s{flags(::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0), false)};
     if (!s) return std::unexpected(ChannelError::io);
     // Blocking connect (a local socket connects at once), then non-blocking.
     if (::connect(s.get(), reinterpret_cast<const sockaddr*>(&*a), sizeof(*a)) != 0)
@@ -184,7 +226,13 @@ std::size_t Channel::unsent() const {
     for (const auto& p : out_) n += p.bytes.size();
     n -= written_;
     int queued = 0;
+#if defined(__linux__)
     if (socket_ && ::ioctl(socket_.get(), SIOCOUTQ, &queued) == 0 && queued > 0) n += static_cast<std::size_t>(queued);
+#elif defined(SO_NWRITE)
+    socklen_t len = sizeof(queued);
+    if (socket_ && ::getsockopt(socket_.get(), SOL_SOCKET, SO_NWRITE, &queued, &len) == 0 && queued > 0)
+        n += static_cast<std::size_t>(queued);
+#endif
     return n;
 }
 

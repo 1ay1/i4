@@ -156,15 +156,22 @@ public:
     template <class K>
     void present(K& k) {
         window_.present(k);
-        // Buffers the GPU has finished with go back to their clients now,
-        // not at the next frame (which, on an idle screen, never comes).
-        gpu_busy_ = window_.window().poll_gpu_retired();
-        flush_gpu_done();
-        // mayag adopts its GPU some frames in; the first present that finds
-        // it importing tells the program what clients may render into.
-        if (!gpu_announced_ && window_.window().can_import_images()) {
+        if constexpr (local_gpu) {
+            // Buffers the GPU has finished with go back to their clients now,
+            // not at the next frame (which, on an idle screen, never comes).
+            gpu_busy_ = window_.window().poll_gpu_retired();
+            flush_gpu_done();
+            // mayag adopts its GPU some frames in; the first present that finds
+            // it importing tells the program what clients may render into.
+            if (!gpu_announced_ && window_.window().can_import_images()) {
+                gpu_announced_ = true;
+                emit_(GpuReady{importable()});
+            }
+        } else if (!gpu_announced_) {
+            // A head that cannot import client buffers (macOS, Windows): it
+            // is a remote head, and takes video.
             gpu_announced_ = true;
-            emit_(GpuReady{importable()});
+            emit_(GpuReady{});
         }
         const bool want = link_.wants_write();
         if (reg_ && want != writing_ && reg_->modify(want ? jaal::interest::read_write : jaal::interest::read))
@@ -233,17 +240,27 @@ public:
     }
 
     [[nodiscard]] Window& window() { return window_; }
+    /// For tests: does this platform take the local zero-copy path?
+    static constexpr bool gpu_local_for_test() { return local_gpu; }
 
     /// What this head's GPU can sample in place, for up::Caps.
     [[nodiscard]] std::vector<link::up::Format> importable() {
         std::vector<link::up::Format> out;
-        for (const auto& f : window_.window().importable_formats())
-            out.push_back({static_cast<std::uint32_t>(f.format), static_cast<std::uint64_t>(f.modifier)});
+        if constexpr (local_gpu)
+            for (const auto& f : window_.window().importable_formats())
+                out.push_back({static_cast<std::uint32_t>(f.format), static_cast<std::uint64_t>(f.modifier)});
         return out;
     }
 
 private:
     static constexpr std::uint64_t kLink = 1u << 20;
+    /// The platform imports client GPU buffers (Linux dmabuf): the local,
+    /// zero-copy path. Elsewhere only remote frames (tiles, video) arrive.
+    static constexpr bool local_gpu = requires(Window& w, mayag::Dmabuf d) {
+        w.window().import_image(1u, d, 1, 1, {});
+        w.window().poll_gpu_retired();
+        w.window().after_gpu([] {});
+    };
 
     /// The platform's raw seat (Wayland): real key-up, xkb state, the axis
     /// stream. Wired only where the platform has it; elsewhere the program
@@ -320,6 +337,7 @@ private:
     static std::optional<jaal::shared<mayag::ImageData>> frame(const link::down::Content& c,
                                                                const link::down::ShmLayout& l,
                                                                const transport::Fd& fd) {
+#if defined(__unix__) || defined(__APPLE__)
         struct stat st{};
         if (::fstat(fd.get(), &st) != 0 || st.st_size <= 0) return std::nullopt;
         const auto size = static_cast<std::size_t>(st.st_size);
@@ -330,6 +348,10 @@ private:
         ::munmap(p, size);
         if (!img) return std::nullopt;
         return jaal::shared<mayag::ImageData>::make(std::move(*img));
+#else
+        (void)c, (void)l, (void)fd;
+        return std::nullopt;
+#endif
     }
 
     /// A GPU buffer, shown where it is: zero copies, nothing mapped.
@@ -344,6 +366,10 @@ private:
     /// finished on the GPU: after_gpu -> GpuDone -> up::Released.
     std::uint32_t import(const link::down::Content& c, const link::down::DmabufLayout& l,
                          const std::vector<transport::Fd>& fds) {
+        if constexpr (!local_gpu) {
+            (void)c, (void)l, (void)fds;
+            return 0;
+        } else {
         auto& win = windows_[c.window];
         auto cached = std::ranges::find(win.cache, l.buffer, &Imported::buffer);
         if (cached == win.cache.end()) {
@@ -385,6 +411,7 @@ private:
             window_.window().after_gpu([this, w = c.window, g = win.shown] { gpu_done_.push_back({w, g}); });
         win.shown = c.generation;
         return cached->texture;
+        }
     }
 
     /// A window is gone: its imported buffers go with it.
@@ -393,7 +420,8 @@ private:
         decoders_.erase(w);
         auto it = windows_.find(w);
         if (it == windows_.end()) return;
-        for (const auto& i : it->second.cache) window_.window().release_texture(i.texture);
+        if constexpr (local_gpu)
+            for (const auto& i : it->second.cache) window_.window().release_texture(i.texture);
         windows_.erase(it);
     }
 

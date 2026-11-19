@@ -64,16 +64,27 @@ set(MAYAG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(MAYAG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/mayag EXCLUDE_FROM_ALL SYSTEM)
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(XKB REQUIRED IMPORTED_TARGET xkbcommon)
-pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
-# Video for heads across a network: FFmpeg decodes on every head platform;
-# the session encodes on its GPU (EGL + GLES to read client buffers).
-pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
-pkg_check_modules(GPU REQUIRED IMPORTED_TARGET egl glesv2)
+# The session (i4d) is a Wayland compositor: Linux only. On macOS / Windows /
+# BSD only what a head needs builds: the portable layers, the transport, the
+# remote decoders, and i4-head itself.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(I4_SESSION_DEFAULT ON)
+else()
+    set(I4_SESSION_DEFAULT OFF)
+endif()
+option(I4_WITH_SESSION "Build i4d (Linux)" ${I4_SESSION_DEFAULT})
 
-# -- wl: Wayland, both halves, no libwayland (from loom) -------------------------
-include(cmake/wl.cmake)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+# Video for heads across a network: FFmpeg decodes on every head platform.
+pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+if(I4_WITH_SESSION)
+    pkg_check_modules(XKB REQUIRED IMPORTED_TARGET xkbcommon)
+    # The session encodes on its GPU (EGL + GLES read client buffers).
+    pkg_check_modules(GPU REQUIRED IMPORTED_TARGET egl glesv2)
+    # -- wl: Wayland, both halves, no libwayland (from loom) ---------------------
+    include(cmake/wl.cmake)
+endif()
 
 # -- transport ------------------------------------------------------------------
 # Moving link messages between processes: a local SOCK_SEQPACKET channel with
@@ -91,13 +102,15 @@ target_link_libraries(i4_remote PUBLIC i4::link PRIVATE PkgConfig::ZSTD PkgConfi
 add_library(i4_session STATIC src/server/session.cpp src/server/apps.cpp)
 target_link_libraries(i4_session PUBLIC i4::link jaal::jaal PRIVATE i4_warnings)
 
-add_library(i4_server STATIC src/server/host.cpp src/server/host_protocol.cpp src/server/keyboard.cpp
-            src/server/syncobj.cpp src/server/encoder.cpp)
-target_link_libraries(i4_server PUBLIC i4_session i4_transport i4_remote i4::wl_server PkgConfig::XKB PRIVATE i4_warnings
-                      PkgConfig::AV PkgConfig::GPU ${CMAKE_DL_LIBS})
+if(I4_WITH_SESSION)
+    add_library(i4_server STATIC src/server/host.cpp src/server/host_protocol.cpp src/server/keyboard.cpp
+                src/server/syncobj.cpp src/server/encoder.cpp)
+    target_link_libraries(i4_server PUBLIC i4_session i4_transport i4_remote i4::wl_server PkgConfig::XKB
+                          PRIVATE i4_warnings PkgConfig::AV PkgConfig::GPU ${CMAKE_DL_LIBS})
 
-add_executable(i4d src/app/i4d.cpp)
-target_link_libraries(i4d PRIVATE i4_server i4_warnings)
+    add_executable(i4d src/app/i4d.cpp)
+    target_link_libraries(i4d PRIVATE i4_server i4_warnings)
+endif()
 
 add_executable(i4-watch src/app/watch.cpp)
 target_link_libraries(i4-watch PRIVATE i4_transport i4_warnings)
