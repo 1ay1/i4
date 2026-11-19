@@ -127,7 +127,11 @@ i4d; `I4D_VERIFY=1` with `I4_HEAD_VERIFY=1` hash every frame on both ends to
 prove the head holds exactly what the client drew.
 
 For the lowest latency run the head fullscreen: `i4-head --fullscreen` (or
-`I4_FULLSCREEN=1`). The host compositor then scans the head's buffer out
+`I4_FULLSCREEN=1`). On a Mac, fullscreen also switches the display to its
+native 2x mode while the head runs (restored on exit): a scaled mode makes
+WindowServer composite every frame, one refresh (measured: key->photon p50
+27.6 -> 21.1 ms). `--scaled` keeps your scaled mode for more space. The host
+compositor then scans the head's buffer out
 directly instead of compositing it, which is most of the difference between
 ~18 ms windowed and ~4 ms fullscreen. Frames are presented without waiting
 for vblank by default (`--vsync` / `I4_VSYNC=1` for tear-free).

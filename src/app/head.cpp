@@ -54,8 +54,11 @@ int main(int argc, char** argv) {
     // rule); its compositing pass and a whole refresh drop out of the path.
     bool fullscreen = std::getenv("I4_FULLSCREEN") != nullptr;
     // --native (macOS): fullscreen in the panel's native 2x mode, so frames
-    // skip WindowServer's scaling composite (one refresh). See native_mode.hpp.
+    // skip WindowServer's scaling composite (one refresh) and are pixel-exact.
+    // The default whenever the head is fullscreen; --scaled (I4_SCALED=1)
+    // keeps the user's scaled mode (more space, one refresh slower).
     bool native_mode = std::getenv("I4_NATIVE") != nullptr;
+    bool scaled = std::getenv("I4_SCALED") != nullptr;
     if (const char* v = std::getenv("I4_VSYNC"); v && *v) vsync = *v != '0';
     head::options.terminal = find_terminal();
     for (int i = 1; i < argc; ++i) {
@@ -67,6 +70,7 @@ int main(int argc, char** argv) {
         else if (a == "--vsync") vsync = true;
         else if (a == "--fullscreen") fullscreen = true;
         else if (a == "--native") native_mode = fullscreen = true;
+        else if (a == "--scaled") scaled = true;
         else if (a == "--immediate") vsync = false;
     }
 
@@ -97,12 +101,13 @@ int main(int argc, char** argv) {
 
     mayag::AppConfig cfg;
 #if defined(__APPLE__)
-    if (native_mode) {
+    if ((native_mode || fullscreen) && !scaled) {
         fullscreen = true;
         (void)app::use_native_display_mode();
     }
 #else
     (void)native_mode;
+    (void)scaled;
 #endif
     cfg.title = "i4";
     cfg.size = {1280, 800};
