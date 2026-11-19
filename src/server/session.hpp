@@ -32,6 +32,11 @@ struct Session {
     };
     struct Head {
         bool welcomed = false;
+        /// What it can sample in place (up::Caps); empty until it says.
+        std::vector<link::up::Format> formats;
+        bool caps_known = false;
+        /// Per window: the newest generation it has released.
+        std::map<wm::WindowId, std::uint64_t> released;
     };
 
     struct Model {
@@ -53,11 +58,13 @@ struct Session {
         };
         std::map<LaunchId, Launch> launches;
         std::uint64_t maps = 0;
+        /// What clients were last offered (so a change is announced once).
+        std::vector<link::up::Format> offered;
     };
 
     using Msg = Event;
     using Cmd = jaal::Cmd<Msg, do_configure, do_close, do_keyboard_focus, do_pointer_at, do_key, do_button, do_send,
-                          do_share, do_frames_done, do_drop, do_spawn>;
+                          do_share, do_frames_done, do_release, do_formats, do_drop, do_spawn>;
 
     /// Scan the .desktop files off the loop; they arrive as ev::AppsFound.
     static Cmd init(Model& m);

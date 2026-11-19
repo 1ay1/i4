@@ -39,11 +39,24 @@ namespace i4::head {
 
 // -- what the link host emits --------------------------------------------------
 
-/// A decoded message from the session. For Content, `pixels` is the frame,
-/// already converted by the host (the fd is closed by then: never held).
+/// A decoded message from the session. For Content, the frame the host
+/// prepared: copied pixels (shm), or a GPU buffer the host already imported
+/// into this window's texture (dmabuf, zero copy).
 struct Heard {
     link::Down message;
     std::optional<jaal::shared<mayag::ImageData>> pixels;
+    /// The dmabuf was imported as the window's texture: nothing to upload.
+    bool imported = false;
+};
+/// The GPU has finished sampling frames up to `generation` of `window`.
+struct GpuDone {
+    wm::WindowId window;
+    std::uint64_t generation;
+};
+/// The GPU came up (mayag starts on the CPU and adopts it when ready), and
+/// this is what it can sample in place.
+struct GpuReady {
+    std::vector<link::up::Format> formats;
 };
 /// The session went away.
 struct Lost {};
@@ -53,7 +66,7 @@ using Events = std::variant<mayag::KeyEvent, mayag::TextEvent, mayag::ComposeEve
                             mayag::MouseMove, mayag::MouseDown, mayag::MouseUp, mayag::ScrollEvent,
                             mayag::ResizeEvent, mayag::FocusEvent, mayag::CloseRequest, mayag::Clicked,
                             mayag::Activated, mayag::Pressed, mayag::Released, mayag::Entered, mayag::Left,
-                            mayag::Dragged, mayag::Scrolled, Heard, Lost>;
+                            mayag::Dragged, mayag::Scrolled, Heard, GpuDone, GpuReady, Lost>;
 
 // -- what the program asks the host for -------------------------------------------
 
@@ -67,6 +80,8 @@ using do_say = jaal::pure_fx<Say, "head.say">;
 struct Options {
     wm::Mod mod = wm::Mod::alt;
     std::string terminal = "foot";
+    /// Offer clients GPU buffers at all (I4_NO_DMABUF=1 turns it off).
+    bool zero_copy = true;
 };
 
 /// Read once by init(): jaal's init takes no arguments.
@@ -83,7 +98,6 @@ struct Head {
         /// Each window's newest frame: the texture it is uploaded as, and
         /// the generation, for the Shown that paces the client.
         std::map<wm::WindowId, std::uint32_t> textures;
-        std::uint32_t next_texture = 1;
 
         wm::Arrangement arranged;
         Motion motion;
@@ -106,7 +120,7 @@ struct Head {
         double dt;
     };
     struct ClearNotice {};
-    using Msg = std::variant<Heard, Lost, mayag::KeyEvent, mayag::TextEvent, mayag::Clicked, mayag::MouseMove,
+    using Msg = std::variant<Heard, GpuDone, GpuReady, Lost, mayag::KeyEvent, mayag::TextEvent, mayag::Clicked, mayag::MouseMove,
                              mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, ClearNotice,
                              mayag::CloseRequest>;
     using Cmd = mayag::Cmd<Msg, do_say, mayag::upload_image, mayag::release_image, mayag::set_title>;
@@ -114,6 +128,8 @@ struct Head {
 
     static Cmd init(Model& m);
     static Cmd update(Model& m, Heard h);
+    static Cmd update(Model& m, GpuDone d);
+    static Cmd update(Model& m, GpuReady g);
     static Cmd update(Model& m, Lost);
     static Cmd update(Model& m, mayag::KeyEvent k);
     static Cmd update(Model& m, mayag::TextEvent t);
@@ -135,5 +151,10 @@ struct Head {
     static Sub subscribe(const Model& m);
     static mayag::Node view(const Model& m);
 };
+
+/// A window's texture id: fixed, so the host (which imports GPU buffers
+/// into it) and the view agree without asking each other. Offset so it
+/// never meets ids the DSL uses for its own images.
+[[nodiscard]] constexpr std::uint32_t texture_of(wm::WindowId w) noexcept { return 0x1000'0000u + w.value; }
 
 }  // namespace i4::head

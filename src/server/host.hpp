@@ -30,6 +30,7 @@
 #include <i4/wl/proto/wayland.hpp>
 #include <i4/wl/proto/xdg_decoration_unstable_v1.hpp>
 #include <i4/wl/proto/xdg_shell.hpp>
+#include <i4/wl/proto/linux_dmabuf_v1.hpp>
 #include <i4/wl/server/display.hpp>
 #include <jaal/jaal.hpp>
 
@@ -53,6 +54,30 @@ struct ShmBuffer {
     std::shared_ptr<Pool> pool;
     std::int32_t offset = 0, width = 0, height = 0, stride = 0;
     wl::proto::wl_shm::format format{};
+};
+
+/// A client's GPU buffer (linux-dmabuf). The server never touches the
+/// memory either: its plane fds go to the head, which samples them where
+/// they are.
+struct DmabufBuffer {
+    struct Plane {
+        std::shared_ptr<wl::OwnedFd> fd;  // shared: planes may share one fd
+        std::uint32_t offset = 0, stride = 0;
+    };
+    std::vector<Plane> planes;
+    std::uint32_t fourcc = 0;
+    std::uint64_t modifier = 0;
+    std::int32_t width = 0, height = 0;
+};
+
+using AnyBuffer = std::variant<ShmBuffer, DmabufBuffer>;
+
+/// zwp_linux_buffer_params_v1, collecting planes until create.
+struct Params {
+    std::map<std::uint32_t, DmabufBuffer::Plane> planes;  // by plane index
+    std::uint64_t modifier = 0;
+    bool modifier_set = false;
+    bool used = false;
 };
 
 // -- surfaces ------------------------------------------------------------------
@@ -153,6 +178,8 @@ public:
     void handle(const fx::Send& e);
     void handle(const fx::Share& e);
     void handle(const fx::FramesDone& e);
+    void handle(const fx::Release& e);
+    void handle(const fx::Formats& e);
     void handle(const fx::Drop& e);
     /// Answers with ev::Launched: the program learns its launch's id.
     Event handle(const fx::Spawn& e);
@@ -180,6 +207,9 @@ private:
     void bind_output(srv::Client& c, std::uint32_t version, id_t id);
     void bind_subcompositor(srv::Client& c, std::uint32_t version, id_t id);
     void bind_decoration(srv::Client& c, std::uint32_t version, id_t id);
+    void bind_dmabuf(srv::Client& c, std::uint32_t version, id_t id);
+    void send_feedback(srv::Client& c, id_t feedback);
+    void rebuild_format_table();
     void committed(Surface& s);
     void destroyed(Surface& s);
     void forget(srv::Client& c);
@@ -217,7 +247,17 @@ private:
 
     using Key = std::pair<srv::Client*, id_t>;
     std::map<Key, std::unique_ptr<Surface>> surfaces_;
-    std::map<Key, ShmBuffer> buffers_;
+    std::map<Key, AnyBuffer> buffers_;
+    std::map<Key, Params> params_;
+
+    // linux-dmabuf: what the heads can sample in place, as the format table
+    // the protocol shares by fd (16 bytes per entry: u32 fourcc, u32 pad,
+    // u64 modifier), and the render node clients should allocate on.
+    std::vector<link::up::Format> formats_;
+    wl::OwnedFd format_table_;
+    std::uint32_t format_table_size_ = 0;
+    std::uint64_t main_device_ = 0;  // dev_t of the render node
+    std::vector<std::pair<srv::Client*, id_t>> feedbacks_;  // to re-send on change
     std::map<wm::WindowId, Key> windows_;
     struct Seat {
         std::vector<id_t> keyboards;

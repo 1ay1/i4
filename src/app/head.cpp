@@ -68,5 +68,7 @@ int main(int argc, char** argv) {
     jaal::run_options opt;
     opt.kernel = mayag::detail::kernel_options(cfg);
     head::Host<head::Head, mayag::platform::Native> host{window, std::move(cfg), std::move(*link)};
+    // I4_NO_DMABUF=1 forces the shm path (for comparison).
+    head::options.zero_copy = std::getenv("I4_NO_DMABUF") == nullptr;
     return jaal::run<head::Head>(host, std::move(opt));
 }

@@ -88,6 +88,12 @@ struct Send { std::vector<HeadId> to; link::Down message; };
 struct Share { std::vector<HeadId> to; wm::WindowId window; };
 /// Frames up to `generation` have been shown: fire the frame callbacks.
 struct FramesDone { wm::WindowId window; std::uint64_t generation; };
+/// Every head is done reading frames up to `generation`: their buffers may
+/// go back to the client (wl_buffer.release), the current one excepted.
+struct Release { wm::WindowId window; std::uint64_t generation; };
+/// What clients should render into: the GPU buffer layouts every attached
+/// head can sample in place (linux-dmabuf feedback). Empty: shm only.
+struct Formats { std::vector<link::up::Format> formats; };
 /// Disconnect a head that broke the protocol.
 struct Drop { HeadId head; };
 /// Start a process in the session (answered by ev::Launched).
@@ -105,6 +111,8 @@ using do_button = jaal::pure_fx<fx::Button, "i4d.button">;
 using do_send = jaal::pure_fx<fx::Send, "i4d.send">;
 using do_share = jaal::pure_fx<fx::Share, "i4d.share">;
 using do_frames_done = jaal::pure_fx<fx::FramesDone, "i4d.frames_done">;
+using do_release = jaal::pure_fx<fx::Release, "i4d.release">;
+using do_formats = jaal::pure_fx<fx::Formats, "i4d.formats">;
 using do_drop = jaal::pure_fx<fx::Drop, "i4d.drop">;
 using do_spawn = jaal::pure_fx<fx::Spawn, "i4d.spawn">;
 

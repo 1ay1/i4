@@ -4,8 +4,16 @@
 // handlers at the bottom are the reverse: the Session decided, this says it
 // to a client.
 #include <algorithm>
+#include <cstring>
 #include <ctime>
 #include <limits>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <i4/wl/proto/linux_dmabuf_v1.hpp>
 
 #include "host.hpp"
 #include "i4/base/match.hpp"
@@ -108,6 +116,7 @@ void Host::publish_globals() {
     global(std::type_identity<wl_output>{}, 4, &Host::bind_output);
     global(std::type_identity<wl_subcompositor>{}, 1, &Host::bind_subcompositor);
     global(std::type_identity<zxdg_decoration_manager_v1>{}, 1, &Host::bind_decoration);
+    global(std::type_identity<zwp_linux_dmabuf_v1>{}, 4, &Host::bind_dmabuf);
 }
 
 void Host::destroyed(Surface& s) {
@@ -130,6 +139,8 @@ void Host::forget(srv::Client& c) {
         it = surfaces_.erase(it);
     }
     std::erase_if(buffers_, [&](const auto& kv) { return kv.first.first == &c; });
+    std::erase_if(params_, [&](const auto& kv) { return kv.first.first == &c; });
+    std::erase_if(feedbacks_, [&](const auto& f) { return f.first == &c; });
     seats_.erase(&c);
 }
 
@@ -513,7 +524,10 @@ void Host::handle(const fx::FramesDone& e) {
     for (auto it = s->owed.begin(); it != end; ++it) due.push_back(it->second);
     s->owed.erase(s->owed.begin(), end);
     answer_frames(*s->client, due, now_ms());
-    release_held(*s, e.generation);
+}
+
+void Host::handle(const fx::Release& e) {
+    if (auto* s = surface(e.window)) release_held(*s, e.generation);
 }
 
 void Host::release_held(Surface& s, std::uint64_t shown) {
@@ -523,6 +537,163 @@ void Host::release_held(Surface& s, std::uint64_t shown) {
             srv::Resource<wl_buffer, 1>{s.client, it->first}.send<wl_buffer::events::release>();
         it = done ? s.held.erase(it) : std::next(it);
     }
+}
+
+// -- linux-dmabuf: GPU buffers, zero copy end to end -------------------------------------
+//
+// v4 feedback: one tranche, on the render node, listing exactly what the
+// heads said they can sample in place (fx::Formats). An app that follows it
+// renders into memory the presenter reads as it is.
+
+void Host::rebuild_format_table() {
+    std::vector<std::byte> table(formats_.size() * 16);
+    for (std::size_t i = 0; i < formats_.size(); ++i) {
+        std::memcpy(table.data() + i * 16, &formats_[i].fourcc, 4);
+        std::memcpy(table.data() + i * 16 + 8, &formats_[i].modifier, 8);
+    }
+    format_table_ = {};
+    format_table_size_ = static_cast<std::uint32_t>(table.size());
+    if (table.empty()) return;
+    wl::OwnedFd fd{::memfd_create("i4-dmabuf-formats", MFD_CLOEXEC | MFD_ALLOW_SEALING)};
+    if (!fd || ::ftruncate(fd.get(), static_cast<off_t>(table.size())) != 0 ||
+        ::pwrite(fd.get(), table.data(), table.size(), 0) != static_cast<ssize_t>(table.size()))
+        return;
+    // Shared with every client read-only: sealed so no one can change it.
+    ::fcntl(fd.get(), F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
+    format_table_ = std::move(fd);
+}
+
+void Host::handle(const fx::Formats& e) {
+    formats_ = e.formats;
+    rebuild_format_table();
+    if (main_device_ == 0) {
+        struct stat st{};
+        if (::stat("/dev/dri/renderD128", &st) == 0) main_device_ = st.st_rdev;
+    }
+    // Clients that already asked hear the new table now (v4: feedback is
+    // live; a client reallocates on the next frame).
+    std::erase_if(feedbacks_, [this](const auto& f) { return !f.first->alive(); });
+    for (const auto& [c, id] : feedbacks_) send_feedback(*c, id);
+}
+
+void Host::send_feedback(srv::Client& c, id_t id) {
+    srv::Resource<zwp_linux_dmabuf_feedback_v1, 4> fb{&c, id};
+    const std::span<const std::byte> dev{reinterpret_cast<const std::byte*>(&main_device_), sizeof main_device_};
+    if (format_table_) {
+        fb.send<zwp_linux_dmabuf_feedback_v1::events::format_table>(BorrowedFd{format_table_.get()}, format_table_size_);
+    }
+    fb.send<zwp_linux_dmabuf_feedback_v1::events::main_device>(dev);
+    if (!formats_.empty()) {
+        std::vector<std::uint16_t> idx(formats_.size());
+        for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<std::uint16_t>(i);
+        fb.send<zwp_linux_dmabuf_feedback_v1::events::tranche_target_device>(dev);
+        fb.send<zwp_linux_dmabuf_feedback_v1::events::tranche_flags>(
+            static_cast<zwp_linux_dmabuf_feedback_v1::tranche_flags>(0));
+        fb.send<zwp_linux_dmabuf_feedback_v1::events::tranche_formats>(
+            std::span<const std::byte>{reinterpret_cast<const std::byte*>(idx.data()), idx.size() * 2});
+        fb.send<zwp_linux_dmabuf_feedback_v1::events::tranche_done>();
+    }
+    fb.send<zwp_linux_dmabuf_feedback_v1::events::done>();
+}
+
+void Host::bind_dmabuf(srv::Client& client, std::uint32_t version, id_t id) {
+    auto l = std::make_shared<srv::RequestListener<zwp_linux_dmabuf_v1>>();
+
+    auto feedback = [this, &client](srv::NewObject<zwp_linux_dmabuf_feedback_v1> f) {
+        auto fl = std::make_shared<srv::RequestListener<zwp_linux_dmabuf_feedback_v1>>();
+        fl->on<zwp_linux_dmabuf_feedback_v1::requests::destroy>([this, &client, fid = f.id()] {
+            std::erase(feedbacks_, std::pair{&client, fid});
+        });
+        f.bind<4>(fl);
+        feedbacks_.emplace_back(&client, f.id());
+        send_feedback(client, f.id());
+    };
+    l->on<zwp_linux_dmabuf_v1::requests::get_default_feedback>(feedback);
+    l->on<zwp_linux_dmabuf_v1::requests::get_surface_feedback>(
+        [feedback](srv::NewObject<zwp_linux_dmabuf_feedback_v1> f, Ref<wl_surface>) { feedback(f); });
+
+    l->on<zwp_linux_dmabuf_v1::requests::create_params>([this, &client](srv::NewObject<zwp_linux_buffer_params_v1> p) {
+        const Key key{&client, p.id()};
+        params_[key] = {};
+        auto pl = std::make_shared<srv::RequestListener<zwp_linux_buffer_params_v1>>();
+        pl->on<zwp_linux_buffer_params_v1::requests::add>(
+            [this, key](BorrowedFd fd, std::uint32_t plane, std::uint32_t offset, std::uint32_t stride,
+                        std::uint32_t mod_hi, std::uint32_t mod_lo) {
+                // Arrived by SCM_RIGHTS: ours to close, so own it at once.
+                auto owned = std::make_shared<wl::OwnedFd>(fd.get());
+                auto it = params_.find(key);
+                if (it == params_.end() || plane > 3 || it->second.planes.contains(plane)) return;
+                it->second.planes[plane] = {std::move(owned), offset, stride};
+                it->second.modifier = (std::uint64_t{mod_hi} << 32) | mod_lo;
+                it->second.modifier_set = true;
+            });
+        // A buffer from params, or nullopt when they are not a complete,
+        // offered layout. Checked HERE: a client may only hand the head
+        // what the head said it can sample.
+        auto build = [this, key](std::int32_t w, std::int32_t h, std::uint32_t fourcc) -> std::optional<DmabufBuffer> {
+            auto it = params_.find(key);
+            if (it == params_.end() || it->second.used || it->second.planes.empty() || w <= 0 || h <= 0)
+                return std::nullopt;
+            it->second.used = true;
+            DmabufBuffer b;
+            b.fourcc = fourcc;
+            b.modifier = it->second.modifier;
+            b.width = w;
+            b.height = h;
+            for (std::uint32_t i = 0; i < it->second.planes.size(); ++i) {
+                auto plane = it->second.planes.find(i);
+                if (plane == it->second.planes.end()) return std::nullopt;  // planes must be 0..n-1
+                b.planes.push_back(plane->second);
+            }
+            if (std::ranges::find(formats_, link::up::Format{fourcc, b.modifier}) == formats_.end())
+                return std::nullopt;
+            return b;
+        };
+        auto adopt = [this, &client](srv::NewObject<wl_buffer> nb, DmabufBuffer b) {
+            buffers_[{&client, nb.id()}] = std::move(b);
+            auto bl = std::make_shared<srv::RequestListener<wl_buffer>>();
+            bl->on<wl_buffer::requests::destroy>([this, &client, bid = nb.id()] { buffers_.erase({&client, bid}); });
+            nb.bind<1>(bl);
+        };
+        pl->on<zwp_linux_buffer_params_v1::requests::create_immed>(
+            [build, adopt, pid = p.id(), &client](srv::NewObject<wl_buffer> nb, std::int32_t w, std::int32_t h,
+                                                  std::uint32_t fourcc, zwp_linux_buffer_params_v1_flags) {
+                auto b = build(w, h, fourcc);
+                if (!b) {
+                    srv::Resource<zwp_linux_buffer_params_v1, 4>{&client, pid}.post_error(
+                        zwp_linux_buffer_params_v1::error::invalid_wl_buffer, "i4: not a layout the presenter can sample");
+                    return;
+                }
+                adopt(nb, std::move(*b));
+            });
+        pl->on<zwp_linux_buffer_params_v1::requests::create>(
+            [build, adopt, pid = p.id(), &client](std::int32_t w, std::int32_t h, std::uint32_t fourcc,
+                                                  zwp_linux_buffer_params_v1_flags) {
+                srv::Resource<zwp_linux_buffer_params_v1, 4> params{&client, pid};
+                auto b = build(w, h, fourcc);
+                if (!b) {
+                    params.send<zwp_linux_buffer_params_v1::events::failed>();
+                    return;
+                }
+                // The server creates the wl_buffer: an id from the server's
+                // range, announced by `created`.
+                const id_t nid = params.send<zwp_linux_buffer_params_v1::events::created>();
+                adopt(srv::NewObject<wl_buffer>{&client, nid, pid}, std::move(*b));
+            });
+        pl->on<zwp_linux_buffer_params_v1::requests::destroy>([this, key] { params_.erase(key); });
+        p.bind<4>(pl);
+    });
+    l->on<zwp_linux_dmabuf_v1::requests::destroy>([] {});
+
+    auto d = client.bind_resource<zwp_linux_dmabuf_v1, 4>(id, l, version);
+    // v3 and older learn formats from these events instead of feedback.
+    if (version < 4)
+        for (const auto& f : formats_) {
+            d.send<zwp_linux_dmabuf_v1::events::format>(f.fourcc);
+            if (version >= 3)
+                d.send<zwp_linux_dmabuf_v1::events::modifier>(f.fourcc, static_cast<std::uint32_t>(f.modifier >> 32),
+                                                              static_cast<std::uint32_t>(f.modifier));
+        }
 }
 
 }  // namespace i4::server

@@ -1,6 +1,8 @@
 // src/server/session.cpp — i4d's decisions.
 #include "session.hpp"
 
+#include <algorithm>
+
 #include "apps.hpp"
 #include "i4/base/match.hpp"
 
@@ -50,6 +52,37 @@ void step(Model& m, wm::Event e, std::optional<link::Nonce> by, std::vector<Cmd>
 }
 
 Cmd done(std::vector<Cmd> out) { return out.empty() ? Cmd::none() : Cmd::batch(std::move(out)); }
+
+/// The newest generation of `w` that EVERY welcomed head has released: only
+/// those buffers are free, since any head may still be sampling the rest.
+std::uint64_t released_by_all(const Model& m, wm::WindowId w) {
+    std::optional<std::uint64_t> low;
+    for (const auto& [id, h] : m.heads) {
+        if (!h.welcomed) continue;
+        const auto it = h.released.find(w);
+        const std::uint64_t g = it == h.released.end() ? 0 : it->second;
+        low = low ? std::min(*low, g) : g;
+    }
+    return low.value_or(0);
+}
+
+/// Offer clients the GPU layouts every head that has said can sample in
+/// place (each fourcc+modifier in all of them). A head that has not sent
+/// its caps yet does not narrow the offer; with none known nothing changes.
+void offer(Model& m, std::vector<Cmd>& out) {
+    std::optional<std::vector<link::up::Format>> common;
+    for (const auto& [id, h] : m.heads) {
+        if (!h.welcomed || !h.caps_known) continue;
+        if (!common) {
+            common = h.formats;
+            continue;
+        }
+        std::erase_if(*common, [&](const auto& f) { return std::ranges::find(h.formats, f) == h.formats.end(); });
+    }
+    if (!common || *common == m.offered) return;
+    m.offered = std::move(*common);
+    out.push_back(fx::Formats{m.offered});
+}
 
 /// The window under a desktop point, top-most first, and the point in it.
 fx::PointerAt hit(const wm::Arrangement& a, Point<space::Desktop> at) {
@@ -142,8 +175,9 @@ Cmd Session::update(Model& m, ev::Unmapped e) {
 Cmd Session::update(Model& m, ev::Committed e) {
     m.generation[e.window] = e.generation;
     auto to = welcomed(m);
-    // Nobody to show it to: the frame is as shown as it will ever be.
-    if (to.empty()) return fx::FramesDone{e.window, e.generation};
+    // Nobody to show it to: the frame is as shown, and as released, as it
+    // will ever be.
+    if (to.empty()) return Cmd::batch(Cmd{fx::FramesDone{e.window, e.generation}}, Cmd{fx::Release{e.window, e.generation}});
     return fx::Share{std::move(to), e.window};
 }
 
@@ -154,10 +188,19 @@ Cmd Session::update(Model& m, ev::HeadJoined e) {
 
 Cmd Session::update(Model& m, ev::HeadLeft e) {
     m.heads.erase(e.head);
-    if (!welcomed(m).empty()) return {};
-    // The last head is gone: release every client waiting on a frame.
     std::vector<Cmd> out;
-    for (const auto& [w, g] : m.generation) out.push_back(fx::FramesDone{w, g});
+    if (welcomed(m).empty()) {
+        // The last head is gone: nothing will show or read a frame again, so
+        // every client is released from waiting and from its buffers.
+        for (const auto& [w, g] : m.generation) {
+            out.push_back(fx::FramesDone{w, g});
+            out.push_back(fx::Release{w, g});
+        }
+    } else {
+        // It may have been the one holding buffers back, or narrowing formats.
+        for (const auto& [w, g] : m.generation) out.push_back(fx::Release{w, released_by_all(m, w)});
+        offer(m, out);
+    }
     return done(std::move(out));
 }
 
@@ -203,6 +246,17 @@ Cmd Session::update(Model& m, ev::HeadSaid e) {
                 out.push_back(fx::Button{b.button, b.pressed});
             });
     if (reply.shown) out.push_back(fx::FramesDone{reply.shown->window, reply.shown->generation});
+    if (reply.released) {
+        auto& mine = m.heads[e.head].released[reply.released->window];
+        mine = std::max(mine, reply.released->generation);
+        out.push_back(fx::Release{reply.released->window, released_by_all(m, reply.released->window)});
+    }
+    if (reply.caps) {
+        auto& h = m.heads[e.head];
+        h.formats = std::move(reply.caps->formats);
+        h.caps_known = true;
+        offer(m, out);
+    }
     return done(std::move(out));
 }
 

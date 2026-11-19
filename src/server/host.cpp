@@ -1,6 +1,7 @@
 // src/server/host.cpp — the fds: Wayland, the link listener, each head.
 #include "host.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 #include <fcntl.h>
@@ -153,23 +154,43 @@ void Host::handle(const fx::Share& e) {
     if (!s || !s->toplevel || !s->current.buffer) return;
     auto b = buffers_.find({s->client, *s->current.buffer});
     if (b == buffers_.end()) return;
-    const auto& buf = b->second;
-    using F = wl::proto::wl_shm::format;
-    if (buf.format != F::argb8888 && buf.format != F::xrgb8888) return;
 
-    // Zero copy: the client's own pool goes to the head, with where in it
-    // this frame is. Nothing here maps it.
-    const link::down::Content c{e.window, s->toplevel->generation, Size<space::Buffer>{buf.width, buf.height},
-                                buf.offset, buf.stride, buf.format == F::argb8888};
+    // Zero copy either way: the client's own memory goes to the head (shm:
+    // the pool; dmabuf: each plane), with where in it this frame is.
+    // Nothing here maps or reads it.
+    const auto dup = [](int fd) { return transport::Fd{::fcntl(fd, F_DUPFD_CLOEXEC, 0)}; };
+    link::down::Content c{e.window, s->toplevel->generation, {}, link::down::ShmLayout{}};
+    std::vector<int> fds;
+    const bool ok = match(
+        b->second,
+        [&](const ShmBuffer& buf) {
+            using F = wl::proto::wl_shm::format;
+            if (buf.format != F::argb8888 && buf.format != F::xrgb8888) return false;
+            c.size = {buf.width, buf.height};
+            c.layout = link::down::ShmLayout{buf.offset, buf.stride, buf.format == F::argb8888};
+            fds.push_back(buf.pool->fd.get());
+            return true;
+        },
+        [&](const DmabufBuffer& buf) {
+            c.size = {buf.width, buf.height};
+            link::down::DmabufLayout d{buf.fourcc, buf.modifier, {}};
+            for (const auto& p : buf.planes) {
+                d.planes.push_back({p.offset, p.stride});
+                fds.push_back(p.fd->get());
+            }
+            c.layout = std::move(d);
+            return true;
+        });
+    if (!ok) return;
+
     const auto bytes = link::encode(link::Down{c});
     for (auto id : e.to) {
         auto it = heads_.find(id);
         if (it == heads_.end()) continue;
-        const int dup = ::fcntl(buf.pool->fd.get(), F_DUPFD_CLOEXEC, 0);
-        if (dup < 0) continue;
-        std::vector<transport::Fd> fds;
-        fds.emplace_back(dup);
-        (void)it->second.channel.send(bytes, std::move(fds));
+        std::vector<transport::Fd> owned;
+        for (int fd : fds) owned.push_back(dup(fd));
+        if (std::ranges::any_of(owned, [](const auto& f) { return !f.valid(); })) continue;
+        (void)it->second.channel.send(bytes, std::move(owned));
     }
 }
 

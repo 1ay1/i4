@@ -94,10 +94,32 @@ struct Shown {
     std::uint64_t generation;
     friend bool operator==(const Shown&, const Shown&) = default;
 };
+/// The head no longer reads the memory of frames up to `generation`: the
+/// client may write it again. For a copied frame that is at once; for a GPU
+/// buffer the head samples in place, only once the GPU has finished with it.
+struct Released {
+    wm::WindowId window;
+    std::uint64_t generation;
+    friend bool operator==(const Released&, const Released&) = default;
+};
+/// A GPU buffer layout the head can sample in place: a DRM fourcc and
+/// format modifier.
+struct Format {
+    std::uint32_t fourcc;
+    std::uint64_t modifier;
+    friend bool operator==(const Format&, const Format&) = default;
+};
+/// What the head can show without copying, sent once after Hello. The
+/// session offers clients exactly this (linux-dmabuf), so an app renders
+/// into a buffer the presenter can scan or sample as it is.
+struct Caps {
+    std::vector<Format> formats;
+    friend bool operator==(const Caps&, const Caps&) = default;
+};
 }  // namespace up
 
 using Input = std::variant<up::Key, up::Motion, up::Button>;
-using Up = std::variant<up::Hello, up::Request, up::Key, up::Motion, up::Button, up::Shown>;
+using Up = std::variant<up::Hello, up::Request, up::Key, up::Motion, up::Button, up::Shown, up::Released, up::Caps>;
 
 // -- server -> head ------------------------------------------------------------
 
@@ -120,20 +142,35 @@ struct Applied {
     friend bool operator==(const Applied&, const Applied&) = default;
 };
 /// A window's pixels changed. The pixels themselves are NOT in the message:
-/// a transport carries them beside it (locally a memfd passed with the
-/// packet, zero bytes on the wire; remotely, compressed tiles). This is the
-/// data plane, kept out of the replicated log on purpose: a frame is never
-/// part of the window manager's state.
+/// a transport carries them beside it (locally the client's own memory,
+/// passed as fds, zero bytes on the wire; remotely, compressed tiles). This
+/// is the data plane, kept out of the replicated log on purpose: a frame is
+/// never part of the window manager's state.
+/// CPU memory (wl_shm): one fd; 32-bit little-endian B,G,R,A words.
+struct ShmLayout {
+    std::int32_t offset;
+    std::int32_t stride;
+    /// argb8888: alpha is meaningful (premultiplied); xrgb8888: padding.
+    bool alpha;
+    friend bool operator==(const ShmLayout&, const ShmLayout&) = default;
+};
+/// A GPU buffer (linux-dmabuf): one fd per plane, in order.
+struct DmabufLayout {
+    struct Plane {
+        std::uint32_t offset;
+        std::uint32_t stride;
+        friend bool operator==(const Plane&, const Plane&) = default;
+    };
+    std::uint32_t fourcc;
+    std::uint64_t modifier;
+    std::vector<Plane> planes;
+    friend bool operator==(const DmabufLayout&, const DmabufLayout&) = default;
+};
 struct Content {
     wm::WindowId window;
     std::uint64_t generation;
     Size<space::Buffer> size;
-    /// Where in the passed memory the frame starts, and its row pitch.
-    std::int32_t offset;
-    std::int32_t stride;
-    /// 32-bit little-endian B,G,R,A pixels; A means something only if set
-    /// (argb8888), else the fourth byte is padding (xrgb8888).
-    bool alpha;
+    std::variant<ShmLayout, DmabufLayout> layout;
     friend bool operator==(const Content&, const Content&) = default;
 };
 /// What can be launched on the session's machine (its .desktop files).

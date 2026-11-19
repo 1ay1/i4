@@ -44,14 +44,16 @@ Server::Reply Server::receive(const Up& u) {
     return match(
         u,
         [&](const up::Hello& h) -> Reply {
-            if (h.fingerprint != protocol) return {Down{down::Refused{protocol}}, std::nullopt, {}, {}};
-            return {Down{down::Welcome{seq_, state_}}, std::nullopt, {}, {}};
+            if (h.fingerprint != protocol) return {.to_sender = Down{down::Refused{protocol}}};
+            return {.to_sender = Down{down::Welcome{seq_, state_}}};
         },
-        [&](const up::Request& r) -> Reply { return {std::nullopt, apply(r.event, r.nonce), {}, {}}; },
-        [&](const up::Key& k) -> Reply { return {{}, {}, Input{k}, {}}; },
-        [&](const up::Motion& m) -> Reply { return {{}, {}, Input{m}, {}}; },
-        [&](const up::Button& b) -> Reply { return {{}, {}, Input{b}, {}}; },
-        [&](const up::Shown& s) -> Reply { return {{}, {}, {}, s}; });
+        [&](const up::Request& r) -> Reply { return {.step = apply(r.event, r.nonce)}; },
+        [&](const up::Key& k) -> Reply { return {.input = Input{k}}; },
+        [&](const up::Motion& m) -> Reply { return {.input = Input{m}}; },
+        [&](const up::Button& b) -> Reply { return {.input = Input{b}}; },
+        [&](const up::Shown& s) -> Reply { return {.shown = s}; },
+        [&](const up::Released& r) -> Reply { return {.released = r}; },
+        [&](const up::Caps& c) -> Reply { return {.caps = c}; });
 }
 
 }  // namespace i4::link

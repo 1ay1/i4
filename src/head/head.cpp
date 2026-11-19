@@ -65,6 +65,8 @@ Cmd Head::init(Model& m) {
     m.mod = options.mod;
     m.terminal = options.terminal;
     m.bindings = wm::default_bindings(m.mod, options.terminal);
+    // Hello first. What this head can sample in place follows as up::Caps
+    // once the GPU is up (GpuReady); until then clients get shm.
     return Cmd::batch(say(link::Replica::hello()), Cmd{mayag::SetTitle{"i4"}});
 }
 
@@ -73,20 +75,19 @@ Cmd Head::update(Model& m, Heard h) {
     const bool first = !m.replica.ready();
 
     if (const auto* c = std::get_if<link::down::Content>(&h.message)) {
-        // A new frame: upload it as this window's texture, and tell the
-        // session it is shown (the client may draw the next one).
-        if (h.pixels) {
-            auto [it, fresh] = m.textures.try_emplace(c->window, m.next_texture);
-            if (fresh) ++m.next_texture;
-            if (false) {
-                // The centre pixel, so a trace shows real content arrived.
-                const auto& img = h.pixels->get();
-                const auto i = (static_cast<std::size_t>(img.height / 2) * img.width + img.width / 2) * 4;
-                std::fprintf(stderr, "i4-head: window %u frame %llu %dx%d centre rgba(%u,%u,%u,%u)\n",
-                             c->window.value, static_cast<unsigned long long>(c->generation), img.width, img.height,
-                             img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3]);
-            }
-            out.push_back(mayag::upload(it->second, std::move(*h.pixels)));
+        // A new frame. A GPU buffer was imported by the host as this
+        // window's texture already (zero copy) and is released when the GPU
+        // has finished with it (GpuDone). Copied pixels are uploaded, and
+        // the client's memory is free again at once.
+        const auto tex = texture_of(c->window);
+        if (h.imported) {
+            m.textures[c->window] = tex;
+        } else if (h.pixels) {
+            m.textures[c->window] = tex;
+            out.push_back(mayag::upload(tex, std::move(*h.pixels)));
+            out.push_back(say(link::up::Released{c->window, c->generation}));
+        } else {
+            out.push_back(say(link::up::Released{c->window, c->generation}));
         }
         out.push_back(say(link::up::Shown{c->window, c->generation}));
         return batch(std::move(out));
@@ -119,6 +120,16 @@ Cmd Head::update(Model& m, Heard h) {
     rearrange(m);
     if (first && m.replica.ready()) out.push_back(report_output(m));
     return batch(std::move(out));
+}
+
+Cmd Head::update(Model&, GpuDone d) { return say(link::up::Released{d.window, d.generation}); }
+
+/// The session offers clients exactly this over linux-dmabuf, so they render
+/// straight into memory this GPU shows as it is.
+Cmd Head::update(Model&, GpuReady g) {
+    if (!options.zero_copy) g.formats.clear();
+    std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts\n", g.formats.size());
+    return say(link::up::Caps{std::move(g.formats)});
 }
 
 Cmd Head::update(Model& m, Lost) {

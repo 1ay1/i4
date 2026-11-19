@@ -108,10 +108,12 @@ public:
     /// acknowledgements are not the window manager's and are handed back
     /// for the compositor to route.
     struct Reply {
-        std::optional<Down> to_sender;
-        std::optional<Step> step;
-        std::optional<Input> input;
-        std::optional<up::Shown> shown;
+        std::optional<Down> to_sender = {};
+        std::optional<Step> step = {};
+        std::optional<Input> input = {};
+        std::optional<up::Shown> shown = {};
+        std::optional<up::Released> released = {};
+        std::optional<up::Caps> caps = {};
     };
     Reply receive(const Up& u);
 

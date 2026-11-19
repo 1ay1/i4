@@ -78,6 +78,9 @@ TEST(the_head_says_hello_first) {
     H h;
     const auto s = said(h);
     CHECK(s.size() == 1 && s.front() == link::Replica::hello());
+    h.send(GpuReady{{link::up::Format{0x34325241, 0}}});  // the GPU came up
+    const auto c = said(h);
+    CHECK(c.size() == 1 && is<link::up::Caps>(c.front()));
 }
 
 TEST(on_welcome_it_reports_its_screen) {
@@ -124,11 +127,13 @@ TEST(a_frame_is_uploaded_and_acknowledged) {
     mayag::ImageData img;
     img.width = img.height = 1;
     img.rgba = {1, 2, 3, 255};
-    h.send(Heard{link::down::Content{wm::WindowId{1}, 5, {1, 1}, 0, 4, true},
+    h.send(Heard{link::down::Content{wm::WindowId{1}, 5, {1, 1}, link::down::ShmLayout{0, 4, true}},
                  jaal::shared<mayag::ImageData>::make(std::move(img))});
     CHECK_EQ(h.effects<mayag::upload_image>().size(), 1u);
     const auto s = said(h);
-    CHECK((s.size() == 1 && s.front() == link::Up{link::up::Shown{wm::WindowId{1}, 5}}));
+    // Copied, so the client's memory is free at once; shown, so it may draw.
+    CHECK((s.size() == 2 && s.front() == link::Up{link::up::Released{wm::WindowId{1}, 5}}));
+    CHECK((s.size() == 2 && s.back() == link::Up{link::up::Shown{wm::WindowId{1}, 5}}));
     CHECK(h.model().textures.contains(wm::WindowId{1}));
 }
 
