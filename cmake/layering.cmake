@@ -5,6 +5,7 @@
 #   link       server <-> head protocol (pure)
 #   wl         Wayland wire + objects, both halves (from loom)
 #   transport  moving link messages between processes (POSIX)
+#   remote     frames as bytes for a head across a network (portable)
 #   server     i4d                 } same rank: neither may include the other.
 #   head       i4-head             } They meet only through link.
 #   app        binaries
@@ -28,11 +29,12 @@ set(rank_wm        1)
 set(rank_link      2)
 set(rank_wl        2)
 set(rank_transport 3)
+set(rank_remote    3)
 set(rank_server    4)
 set(rank_head      4)
 set(rank_app       5)
 
-set(portable base wm link)
+set(portable base wm link remote)
 set(os_headers "unistd\\.h|sys/|linux/|fcntl\\.h|poll\\.h|xf86drm|gbm\\.h|EGL/|windows\\.h|wayland-")
 
 set(hits "")

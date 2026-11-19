@@ -37,6 +37,7 @@
 #include <jaal/jaal.hpp>
 
 #include "../transport/channel.hpp"
+#include "../remote/tiles.hpp"
 #include "keyboard.hpp"
 #include "syncobj.hpp"
 #include "vocab.hpp"
@@ -198,6 +199,8 @@ public:
         std::string wayland_display = "wayland-i4";
         /// Where launched apps' stdout/stderr go.
         std::string app_log = "/dev/null";
+        /// Heads across a network connect here (tcp:HOST:PORT), if given.
+        std::string remote;
     };
 
     Host(Options options, transport::Fd link_listener);
@@ -251,7 +254,16 @@ private:
         transport::Channel channel;
         std::optional<Registration> reg;
         bool writing = false;
+        /// Across a network: frames go as changed tiles (remote/tiles.hpp),
+        /// against what this head was last sent of each window.
+        std::map<wm::WindowId, remote::Canvas> shadow;
+        /// A window's newest frame, waiting while the link is backed up: a
+        /// slow network skips frames instead of queueing stale ones.
+        std::set<wm::WindowId> behind;
     };
+    /// Encode `window`'s content for remote head `id` and send it.
+    void share_remote(HeadId id, HeadConn& h, wm::WindowId window);
+    static constexpr std::size_t kBacklog = 256u << 10;  // bytes in flight before frames are skipped
 
     void start();
     void ready(const jaal::readiness& r);
@@ -302,7 +314,7 @@ private:
     void release_held(Surface& s, std::uint64_t shown);
 
     // heads (host.cpp)
-    void accept_head();
+    void accept_head(const transport::Fd& listener);
     void read_head(HeadId id);
     void drop_head(HeadId id);
     void rewatch(HeadId id);
@@ -320,6 +332,8 @@ private:
     std::optional<Keymap> keymap_;
     transport::Fd listener_;
     std::optional<Registration> listener_reg_;
+    transport::Fd remote_listener_;
+    std::optional<Registration> remote_listener_reg_;
     std::function<void(Event)> emit_;
     std::function<jaal::result<Registration>(int, jaal::interest, std::uint64_t)> watch_;
 

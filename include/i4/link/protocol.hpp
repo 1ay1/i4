@@ -202,6 +202,26 @@ struct DmabufLayout {
     std::vector<Plane> planes;
     friend bool operator==(const DmabufLayout&, const DmabufLayout&) = default;
 };
+/// Pixels in the message itself, for a head across a network (no fds can
+/// get there). Lossless: the frame is cut into `tile` x `tile` squares and
+/// only those that changed since the last frame THIS head was sent travel,
+/// zstd-compressed. A keystroke in a terminal is a few hundred bytes.
+///
+/// `tiles` are tile indices, row-major over ceil(width/tile) columns, rising.
+/// `data` (once decompressed) is each listed tile's pixels in that order,
+/// its rows tight (edge tiles are narrower/shorter), as 32-bit little-endian
+/// B,G,R,A words like ShmLayout. `keyframe`: every tile is listed and the
+/// head need not have seen any earlier frame (a new head, a resize).
+struct Encoded {
+    std::uint32_t tile = 64;
+    bool alpha = true;
+    bool keyframe = true;
+    std::vector<std::uint32_t> tiles;
+    std::uint32_t raw_size = 0;  // decompressed bytes
+    std::string data;            // zstd
+    [[nodiscard]] bool valid() const { return tile >= 8 && tile <= 512 && raw_size <= (256u << 20); }
+    friend bool operator==(const Encoded&, const Encoded&) = default;
+};
 /// A frame is sent only once it is READY: a client using explicit sync
 /// (linux-drm-syncobj) has its acquire point waited for by the session, and
 /// its release point signalled by the session once every head has released
@@ -211,7 +231,7 @@ struct Content {
     wm::WindowId window;
     std::uint64_t generation;
     Size<space::Buffer> size;
-    std::variant<ShmLayout, DmabufLayout> layout;
+    std::variant<ShmLayout, DmabufLayout, Encoded> layout;
     friend bool operator==(const Content&, const Content&) = default;
 };
 /// What can be launched on the session's machine (its .desktop files).

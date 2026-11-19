@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 
 #include "../transport/channel.hpp"
+#include "../remote/tiles.hpp"
 #include "head.hpp"
 #include "pixels.hpp"
 
@@ -88,7 +89,26 @@ public:
             auto d = link::decode<link::Down>(p.bytes);
             if (!d) continue;
             Heard h{std::move(*d), std::nullopt, 0};
-            if (const auto* c = std::get_if<link::down::Content>(&h.message); c && !p.fds.empty()) {
+            if (const auto* c = std::get_if<link::down::Content>(&h.message);
+                c && std::holds_alternative<link::down::Encoded>(c->layout)) {
+                // Across a network: changed tiles onto this window's canvas,
+                // converted to RGBA as they land; the canvas is the image.
+                const auto t0 = std::chrono::steady_clock::now();
+                auto& canvas = canvases_[c->window];
+                const auto& e = std::get<link::down::Encoded>(c->layout);
+                if (remote::apply(canvas, c->size.width, c->size.height, e, true)) {
+                    mayag::ImageData img;
+                    img.width = canvas.width;
+                    img.height = canvas.height;
+                    img.rgba.assign(reinterpret_cast<const std::uint8_t*>(canvas.pixels.data()),
+                                    reinterpret_cast<const std::uint8_t*>(canvas.pixels.data()) + canvas.pixels.size());
+                    h.pixels = jaal::shared<mayag::ImageData>::make(std::move(img));
+                }
+                if (trace_)
+                    std::fprintf(stderr, "i4-head: remote frame %dx%d  %zu tiles  %zu bytes  %.3f ms\n", c->size.width,
+                                 c->size.height, e.tiles.size(), e.data.size(),
+                                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            } else if (c && !p.fds.empty()) {
                 const auto t0 = std::chrono::steady_clock::now();
                 if (const auto* dl = std::get_if<link::down::DmabufLayout>(&c->layout))
                     h.texture = import(*c, *dl, p.fds);
@@ -225,7 +245,13 @@ private:
                     [&]<class T>(const T& e) {
                         if constexpr (std::is_same_v<T, r::Key>) {
                             if (e.pressed && trace_) last_key_ = std::chrono::steady_clock::now();
-                            if (e.pressed) key_down_at_ = native_.event_seconds(e.time);
+                            // From when the head got the key: event stamps
+                            // from synthetic input (hyprctl, wtype) can be
+                            // stale, which would inflate every sample.
+                            if (e.pressed)
+                                key_down_at_ = std::chrono::duration<double>(
+                                                   std::chrono::steady_clock::now().time_since_epoch())
+                                                   .count();
                             emit_(KeyInput{e.code, e.pressed, mayag::KeyEvent{e.key, e.mods, false}});
                         } else if constexpr (std::is_same_v<T, r::Keymap>) {
                             emit_(KeymapInput{e.text});
@@ -344,6 +370,7 @@ private:
 
     /// A window is gone: its imported buffers go with it.
     void forget(wm::WindowId w) {
+        canvases_.erase(w);
         auto it = windows_.find(w);
         if (it == windows_.end()) return;
         for (const auto& i : it->second.cache) window_.window().release_texture(i.texture);
@@ -379,6 +406,7 @@ private:
         std::uint64_t shown = 0;      // generation on screen
     };
     std::map<wm::WindowId, WindowGpu> windows_;
+    std::map<wm::WindowId, remote::Canvas> canvases_;  // remote frames, as they stand
     std::uint32_t next_texture_ = 0x2000'0000u;
     std::vector<GpuDone> gpu_done_;
     bool gpu_busy_ = false;

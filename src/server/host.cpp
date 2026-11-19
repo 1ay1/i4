@@ -2,9 +2,14 @@
 #include "host.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 
 #include <fcntl.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -17,6 +22,7 @@ namespace i4::server {
 namespace {
 
 constexpr std::uint64_t kListener = 1;
+constexpr std::uint64_t kRemoteListener = 2;
 constexpr std::uint64_t kHeadBase = 1u << 16;     // + head id
 constexpr std::uint64_t kLaunchBase = 1u << 20;   // + launch id
 constexpr std::uint64_t kWaylandBase = 1u << 24;  // + i4::wl's key
@@ -38,6 +44,12 @@ Host::Host(Options options, transport::Fd link_listener)
             break;
         }
     }
+    if (!options_.remote.empty()) {
+        if (auto l = transport::Channel::listen(options_.remote))
+            remote_listener_ = std::move(*l);
+        else
+            std::fprintf(stderr, "i4d: cannot listen on %s\n", options_.remote.c_str());
+    }
     display_.on_client_created([this](srv::Client& c) { greet(c); });
     publish_globals();
 }
@@ -53,6 +65,9 @@ void Host::start() {
     display_.on_unwatch([this](std::uint64_t key) { wayland_.erase(key); });
     if (listener_)
         if (auto r = watch_(listener_.get(), jaal::interest::read, kListener)) listener_reg_.emplace(std::move(*r));
+    if (remote_listener_)
+        if (auto r = watch_(remote_listener_.get(), jaal::interest::read, kRemoteListener))
+            remote_listener_reg_.emplace(std::move(*r));
     // The output is the first thing the session hears, like any other event.
     emit(ev::OutputReady{options_.output});
 }
@@ -61,6 +76,7 @@ void Host::release() {
     heads_.clear();
     wayland_.clear();
     listener_reg_.reset();
+    remote_listener_reg_.reset();
     // Launched apps outlive the session's loop (they are the user's), but
     // their exit watches do not.
     for (auto& [id, r] : launches_) r.exit.reset();
@@ -95,7 +111,9 @@ void Host::ready(const jaal::readiness& r) {
         if (auto st = s->staged.find(n); st != s->staged.end()) st->second.wait = 0;
         acquired(*s, n);
     } else if (r.token == kListener) {
-        accept_head();
+        accept_head(listener_);
+    } else if (r.token == kRemoteListener) {
+        accept_head(remote_listener_);
     }
 }
 
@@ -103,17 +121,27 @@ void Host::flush() {
     display_.flush_clients();
     std::vector<HeadId> ids;
     for (const auto& [id, h] : heads_) ids.push_back(id);
-    for (auto id : ids) rewatch(id);
+    for (auto id : ids) {
+        // A remote head that skipped frames while the network was backed
+        // up gets each window's NEWEST frame once it has drained.
+        if (auto it = heads_.find(id); it != heads_.end() && !it->second.behind.empty() &&
+                                       it->second.channel.unsent() < kBacklog) {
+            const auto behind = std::exchange(it->second.behind, {});
+            for (auto w : behind) share_remote(id, it->second, w);
+        }
+        rewatch(id);
+    }
 }
 
 // -- heads ---------------------------------------------------------------------
 
-void Host::accept_head() {
-    auto ch = transport::Channel::accept(listener_);
+void Host::accept_head(const transport::Fd& listener) {
+    auto ch = transport::Channel::accept(listener);
     if (!ch) return;
     const auto id = next_head_;
     next_head_ = next_head_.next();
-    HeadConn h{std::move(*ch), std::nullopt, false};
+    if (ch->remote()) std::fprintf(stderr, "i4d: head %u connected over the network\n", id.value);
+    HeadConn h{std::move(*ch), std::nullopt, false, {}, {}};
     if (auto r = watch_(h.channel.fd(), jaal::interest::read, kHeadBase + id.value)) h.reg.emplace(std::move(*r));
     heads_.emplace(id, std::move(h));
     emit(ev::HeadJoined{id});
@@ -207,11 +235,113 @@ void Host::handle(const fx::Share& e) {
     for (auto id : e.to) {
         auto it = heads_.find(id);
         if (it == heads_.end()) continue;
+        if (it->second.channel.remote()) {
+            share_remote(id, it->second, e.window);
+            continue;
+        }
         std::vector<transport::Fd> owned;
         for (int fd : fds) owned.push_back(dup(fd));
         if (std::ranges::any_of(owned, [](const auto& f) { return !f.valid(); })) continue;
         (void)it->second.channel.send(bytes, std::move(owned));
     }
+}
+
+// -- heads across a network -------------------------------------------------------
+//
+// No fd reaches another machine, so here (and only here) i4d reads a frame:
+// the client's finished buffer is mapped, diffed tile by tile against what
+// this head already has, and the changed tiles go out compressed. Then the
+// buffer is the client's again at once (the copy is ours), and its frame
+// callback fires as soon as the bytes are on their way: the client draws at
+// the rate the NETWORK takes frames. While the socket is backed up, frames
+// are skipped, not queued, so a keystroke's frame never waits behind stale
+// ones; the newest goes out when it drains (flush()).
+
+namespace {
+
+/// A mapping of `size` bytes of `fd`, unmapped on scope exit.
+struct Mapped {
+    void* p = MAP_FAILED;
+    std::size_t size = 0;
+    Mapped(int fd, std::size_t n) : p(::mmap(nullptr, n, PROT_READ, MAP_SHARED, fd, 0)), size(n) {}
+    Mapped(const Mapped&) = delete;
+    Mapped& operator=(const Mapped&) = delete;
+    ~Mapped() {
+        if (p != MAP_FAILED) ::munmap(p, size);
+    }
+    [[nodiscard]] std::span<const std::byte> bytes() const {
+        return p == MAP_FAILED ? std::span<const std::byte>{} : std::span{static_cast<const std::byte*>(p), size};
+    }
+};
+
+std::size_t file_size(int fd) {
+    struct stat st{};
+    return ::fstat(fd, &st) == 0 && st.st_size > 0 ? static_cast<std::size_t>(st.st_size) : 0;
+}
+
+}  // namespace
+
+void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
+    auto* s = surface(window);
+    if (!s || !s->toplevel || !s->content) return;
+    if (h.channel.unsent() >= kBacklog) {
+        h.behind.insert(window);
+        return;
+    }
+    auto b = buffers_.find({s->client, *s->content});
+    if (b == buffers_.end()) return;
+    const auto gen = s->toplevel->generation;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::optional<link::down::Encoded> enc;
+    link::down::Content c{window, gen, {}, link::down::ShmLayout{}};
+    match(
+        b->second,
+        [&](const ShmBuffer& buf) {
+            using F = wl::proto::wl_shm::format;
+            if (buf.format != F::argb8888 && buf.format != F::xrgb8888) return;
+            const Mapped m{buf.pool->fd.get(), file_size(buf.pool->fd.get())};
+            c.size = {buf.width, buf.height};
+            enc = remote::encode(h.shadow[window],
+                                 {m.bytes(), buf.width, buf.height, buf.offset, buf.stride, buf.format == F::argb8888});
+        },
+        [&](const DmabufBuffer& buf) {
+            // A LINEAR single-plane 8888 buffer reads straight from the CPU:
+            // a remote head asks clients for exactly that, so they keep
+            // rendering on the GPU. The read is bracketed by DMA_BUF_IOCTL_SYNC
+            // (cache coherence; and it waits out an implicit-sync client's
+            // rendering, which is already done for an explicit-sync one).
+            constexpr std::uint32_t ar24 = 0x34325241, xr24 = 0x34325258;
+            if (buf.modifier != 0 || buf.planes.size() != 1 || (buf.fourcc != ar24 && buf.fourcc != xr24)) return;
+            const auto& p = buf.planes.front();
+            const int fd = p.fd->get();
+            const auto size = static_cast<std::size_t>(::lseek(fd, 0, SEEK_END));
+            const Mapped m{fd, size};
+            if (m.bytes().empty()) return;
+            dma_buf_sync sync{DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
+            (void)::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+            c.size = {buf.width, buf.height};
+            enc = remote::encode(h.shadow[window], {m.bytes(), buf.width, buf.height, static_cast<std::int32_t>(p.offset),
+                                                    static_cast<std::int32_t>(p.stride), buf.fourcc == ar24});
+            sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+            (void)::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+        });
+    if (!enc) return;
+    if (static const bool trace = std::getenv("I4D_TRACE") != nullptr; trace)
+        std::fprintf(stderr, "i4d: remote encode %dx%d  %zu tiles  %zu bytes  %.3f ms\n", c.size.width, c.size.height,
+                     enc->tiles.size(), enc->data.size(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    const bool nothing = enc->tiles.empty();
+    if (!nothing) {
+        c.layout = std::move(*enc);
+        if (!h.channel.send(link::encode(link::Down{c}))) {
+            drop_head(id);
+            return;
+        }
+    }
+    // The pixels are ours now and on their way: the buffer goes back to the
+    // client and its frame callback fires, without waiting a round trip.
+    emit(ev::HeadSaid{id, link::up::Released{window, gen}});
+    emit(ev::HeadSaid{id, link::up::Shown{window, gen}});
 }
 
 Event Host::handle(const fx::Spawn& e) {

@@ -1,6 +1,9 @@
 // src/app/head.cpp — i4-head: attach a mayag window to a session.
 //
-//   i4-head [--link PATH] [--super] [--terminal CMD]
+//   i4-head [--link PATH | --link tcp:HOST:PORT] [--super] [--terminal CMD]
+//
+// --link tcp:HOST:PORT attaches to a session on another machine (i4d
+// --remote tcp::PORT); frames arrive as compressed changed tiles.
 //
 // $mod+d opens the launcher: the session's apps, fuzzy-searched.
 //
@@ -68,7 +71,9 @@ int main(int argc, char** argv) {
     jaal::run_options opt;
     opt.kernel = mayag::detail::kernel_options(cfg);
     head::Host<head::Head, mayag::platform::Native> host{window, std::move(cfg), std::move(*link)};
-    // I4_NO_DMABUF=1 forces the shm path (for comparison).
-    head::options.zero_copy = std::getenv("I4_NO_DMABUF") == nullptr;
+    // I4_NO_DMABUF=1 forces the shm path (for comparison). Across a network
+    // nothing can be imported: clients render to shm, i4d sends tiles.
+    head::options.zero_copy = std::getenv("I4_NO_DMABUF") == nullptr && !transport::Channel::is_tcp(path);
+    head::options.remote = transport::Channel::is_tcp(path);
     return jaal::run<head::Head>(host, std::move(opt));
 }

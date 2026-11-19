@@ -14,6 +14,10 @@ i4_test(test_wire)
 i4_test(test_replica)
 i4_test(test_bindings)
 
+add_executable(test_tiles test_tiles.cpp)
+target_link_libraries(test_tiles PRIVATE i4_remote i4_warnings)
+add_test(NAME test_tiles COMMAND test_tiles)
+
 add_executable(test_session test_session.cpp)
 target_link_libraries(test_session PRIVATE i4_session i4_warnings)
 target_include_directories(test_session PRIVATE ${PROJECT_SOURCE_DIR}/src)

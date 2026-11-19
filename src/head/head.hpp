@@ -125,6 +125,8 @@ struct Options {
     std::string terminal = "foot";
     /// Offer clients GPU buffers at all (I4_NO_DMABUF=1 turns it off).
     bool zero_copy = true;
+    /// Attached across a network (--link tcp:...): frames arrive as bytes.
+    bool remote = false;
 };
 
 /// Read once by init(): jaal's init takes no arguments.

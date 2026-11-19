@@ -78,18 +78,21 @@ Cmd Head::update(Model& m, Heard h) {
         // A new frame. A GPU buffer was imported by the host as this
         // window's texture already (zero copy) and is released when the GPU
         // has finished with it (GpuDone). Copied pixels are uploaded, and
-        // the client's memory is free again at once.
+        // the client's memory is free again at once. A frame that came over
+        // the network was released and paced by the session when it sent it:
+        // nothing goes back.
+        const bool remote = std::holds_alternative<link::down::Encoded>(c->layout);
         const auto tex = texture_of(c->window);
         if (h.texture != 0) {
             m.textures[c->window] = h.texture;
         } else if (h.pixels) {
             m.textures[c->window] = tex;
             out.push_back(mayag::upload(tex, std::move(*h.pixels)));
-            out.push_back(say(link::up::Released{c->window, c->generation}));
-        } else {
+            if (!remote) out.push_back(say(link::up::Released{c->window, c->generation}));
+        } else if (!remote) {
             out.push_back(say(link::up::Released{c->window, c->generation}));
         }
-        out.push_back(say(link::up::Shown{c->window, c->generation}));
+        if (!remote) out.push_back(say(link::up::Shown{c->window, c->generation}));
         return batch(std::move(out));
     }
 
@@ -129,7 +132,12 @@ Cmd Head::update(Model&, GpuDone d) { return say(link::up::Released{d.window, d.
 /// The session offers clients exactly this over linux-dmabuf, so they render
 /// straight into memory this GPU shows as it is.
 Cmd Head::update(Model&, GpuReady g) {
-    if (!options.zero_copy) g.formats.clear();
+    // Across a network the session reads each frame to send it. From shm that
+    // costs ~0.7 ms; from a GPU buffer (even LINEAR) on a discrete card it is
+    // a read across PCIe from video memory, ~8 ms, on the session's loop. So
+    // a remote head offers none: clients draw to shm. (Native speed for GPU
+    // clients needs the read on the GPU: an encoder next to the session.)
+    if (!options.zero_copy || options.remote) g.formats.clear();
     std::fprintf(stderr, "i4-head: GPU ready, %zu zero-copy buffer layouts\n", g.formats.size());
     return say(link::up::Caps{std::move(g.formats)});
 }
