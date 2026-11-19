@@ -106,13 +106,26 @@ std::optional<link::down::Encoded> encode(Canvas& shadow, const Source& s, std::
     // reappear shifted. The head moves its copy the same way; the diff is
     // then against the moved shadow, so only revealed rows are new.
     if (!e.keyframe) {
-        std::vector<std::uint64_t> now(static_cast<std::size_t>(s.height)), was(static_cast<std::size_t>(s.height));
-        for (std::int32_t y = 0; y < s.height; ++y) {
-            now[static_cast<std::size_t>(y)] =
-                hash_row(s.memory.data() + s.offset + static_cast<std::size_t>(y) * static_cast<std::size_t>(s.stride), pitch);
-            was[static_cast<std::size_t>(y)] = hash_row(shadow.pixels.data() + static_cast<std::size_t>(y) * pitch, pitch);
+        // Cheap first: how many rows differ at all (memcmp stops at the first
+        // difference; an unchanged row is one pass at memory speed). A
+        // keystroke changes a few dozen rows; only a frame with many changed
+        // rows can be a scroll, and only then are rows hashed and voted on.
+        const auto src_row = [&](std::int32_t y) {
+            return s.memory.data() + s.offset + static_cast<std::size_t>(y) * static_cast<std::size_t>(s.stride);
+        };
+        int changed_rows = 0;
+        for (std::int32_t y = 0; y < s.height && changed_rows < 64; ++y)
+            changed_rows += std::memcmp(src_row(y), shadow.pixels.data() + static_cast<std::size_t>(y) * pitch, pitch) != 0;
+        std::vector<std::uint64_t> now, was;
+        if (changed_rows >= 64) {
+            now.resize(static_cast<std::size_t>(s.height));
+            was.resize(static_cast<std::size_t>(s.height));
+            for (std::int32_t y = 0; y < s.height; ++y) {
+                now[static_cast<std::size_t>(y)] = hash_row(src_row(y), pitch);
+                was[static_cast<std::size_t>(y)] = hash_row(shadow.pixels.data() + static_cast<std::size_t>(y) * pitch, pitch);
+            }
         }
-        if (auto m = find_move(now, was, s.width)) {
+        if (auto m = changed_rows >= 64 ? find_move(now, was, s.width) : std::nullopt) {
             e.scroll = m;
             auto row = [&](std::int32_t y) { return shadow.pixels.data() + static_cast<std::size_t>(y) * pitch; };
             if (m->dy > 0)

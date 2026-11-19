@@ -16,6 +16,7 @@
 
 #include "../head/head.hpp"
 #include "../head/host.hpp"
+#include "native_mode.hpp"
 
 #include <unistd.h>
 
@@ -52,6 +53,9 @@ int main(int argc, char** argv) {
     // directly and may flip it mid-frame (Hyprland: an `immediate` window
     // rule); its compositing pass and a whole refresh drop out of the path.
     bool fullscreen = std::getenv("I4_FULLSCREEN") != nullptr;
+    // --native (macOS): fullscreen in the panel's native 2x mode, so frames
+    // skip WindowServer's scaling composite (one refresh). See native_mode.hpp.
+    bool native_mode = std::getenv("I4_NATIVE") != nullptr;
     if (const char* v = std::getenv("I4_VSYNC"); v && *v) vsync = *v != '0';
     head::options.terminal = find_terminal();
     for (int i = 1; i < argc; ++i) {
@@ -62,6 +66,7 @@ int main(int argc, char** argv) {
         else if (a == "--terminal" && i + 1 < argc) head::options.terminal = argv[++i];
         else if (a == "--vsync") vsync = true;
         else if (a == "--fullscreen") fullscreen = true;
+        else if (a == "--native") native_mode = fullscreen = true;
         else if (a == "--immediate") vsync = false;
     }
 
@@ -91,6 +96,14 @@ int main(int argc, char** argv) {
     }
 
     mayag::AppConfig cfg;
+#if defined(__APPLE__)
+    if (native_mode) {
+        fullscreen = true;
+        (void)app::use_native_display_mode();
+    }
+#else
+    (void)native_mode;
+#endif
     cfg.title = "i4";
     cfg.size = {1280, 800};
     cfg.vsync = vsync;

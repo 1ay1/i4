@@ -128,6 +128,9 @@ if(I4_WITH_HEAD)
 
     add_executable(i4-head src/app/head.cpp src/head/head.cpp)
     target_link_libraries(i4-head PRIVATE i4_head i4_transport i4_remote i4_warnings)
+    if(APPLE)
+        target_link_libraries(i4-head PRIVATE "-framework CoreGraphics" "-framework CoreFoundation")
+    endif()
 endif()
 
 if(I4_BUILD_TESTS)
