@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <map>
 #include <optional>
+#include <set>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -124,6 +125,12 @@ public:
         auto lost = reassembly_.expire(1);
         auto quiet = reassembly_.expire_quiet(std::chrono::steady_clock::now(), std::chrono::milliseconds(3));
         lost.windows.insert(lost.windows.end(), quiet.windows.begin(), quiet.windows.end());
+        // A lost frame may have been a video delta: every later delta of that
+        // window references it, so they would decode to a smear (unchanged
+        // blocks copy the wrong reference). Show none until a keyframe.
+        for (auto w : lost.windows) broken_.insert(wm::WindowId{w});
+        if (lost.unknown > 0)
+            for (const auto& [w, d] : decoders_) broken_.insert(w);
         ask_refresh(lost);
     }
 
@@ -167,6 +174,8 @@ public:
             if (c) {
                 auto& g = generation_[c->window];
                 if (c->generation < g) {
+                    // Dropped: if it was video, the decoder's chain is broken.
+                    if (std::holds_alternative<link::down::Video>(c->layout)) broken_.insert(c->window);
                     refresh(c->window);
                     return;
                 }
@@ -176,9 +185,16 @@ public:
                 // Across a network, encoded on the session's GPU: decoded here
                 // by this platform's hardware decoder.
                 const auto t0 = std::chrono::steady_clock::now();
+                const auto& v = std::get<link::down::Video>(c->layout);
+                // After a loss, a delta has no valid reference: skip it (the
+                // refresh already asked for brings a keyframe).
+                if (!v.keyframe && broken_.contains(c->window)) {
+                    if (trace_) std::fprintf(stderr, "i4-head: video delta skipped (waiting for a keyframe)\n");
+                    return;
+                }
+                if (v.keyframe) broken_.erase(c->window);
                 auto& dec = decoders_[c->window];
                 if (!dec) dec = std::make_unique<remote::Decoder>();
-                const auto& v = std::get<link::down::Video>(c->layout);
                 if (auto pic = dec->decode(v, c->size.width, c->size.height)) {
                     // Only what changed goes to the GPU; the whole picture
                     // rides along for the first frame or a resize.
@@ -601,6 +617,7 @@ private:
     std::map<wm::WindowId, remote::Canvas> canvases_;  // remote frames, as they stand
     std::map<wm::WindowId, std::unique_ptr<remote::Decoder>> decoders_;  // remote video, per window
     std::map<wm::WindowId, remote::Picture> pictures_;  // the last decoded picture, to diff against
+    std::set<wm::WindowId> broken_;  // a video frame was lost: deltas wait for a keyframe
     std::uint32_t next_texture_ = 0x2000'0000u;
     std::vector<GpuDone> gpu_done_;
     bool gpu_busy_ = false;
