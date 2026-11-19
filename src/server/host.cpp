@@ -85,6 +85,15 @@ void Host::ready(const jaal::readiness& r) {
             return;
         }
         if (r.readable || r.hangup || r.error) read_head(id);
+    } else if (r.token >= kSyncBase) {
+        // A client's acquire point signalled: that commit is ready to show.
+        auto it = waits_.find(r.token);
+        if (it == waits_.end()) return;
+        auto* s = it->second.surface;
+        const auto n = it->second.commit;
+        waits_.erase(it);
+        if (auto st = s->staged.find(n); st != s->staged.end()) st->second.wait = 0;
+        acquired(*s, n);
     } else if (r.token == kListener) {
         accept_head();
     }
@@ -132,7 +141,6 @@ void Host::read_head(HeadId id) {
 }
 
 void Host::drop_head(HeadId id) {
-    timelines_sent_.erase(id);
     if (heads_.erase(id) != 0) emit(ev::HeadLeft{id});
 }
 
@@ -157,21 +165,21 @@ void Host::handle(const fx::Drop& e) {
     if (auto it = heads_.find(e.head); it != heads_.end()) {
         (void)it->second.channel.flush();  // let the refusal out first
         heads_.erase(it);
-        timelines_sent_.erase(e.head);
     }
 }
 
 void Host::handle(const fx::Share& e) {
     auto* s = surface(e.window);
-    if (!s || !s->toplevel || !s->current.buffer) return;
-    auto b = buffers_.find({s->client, *s->current.buffer});
+    if (!s || !s->toplevel || !s->content) return;
+    auto b = buffers_.find({s->client, *s->content});
     if (b == buffers_.end()) return;
 
     // Zero copy either way: the client's own memory goes to the head (shm:
     // the pool; dmabuf: each plane), with where in it this frame is.
-    // Nothing here maps or reads it.
+    // Nothing here maps or reads it, and it is finished (explicit sync's
+    // acquire point has signalled before a buffer becomes content).
     const auto dup = [](int fd) { return transport::Fd{::fcntl(fd, F_DUPFD_CLOEXEC, 0)}; };
-    link::down::Content c{e.window, s->toplevel->generation, {}, link::down::ShmLayout{}, std::nullopt};
+    link::down::Content c{e.window, s->toplevel->generation, {}, link::down::ShmLayout{}};
     std::vector<int> fds;
     const bool ok = match(
         b->second,
@@ -195,28 +203,10 @@ void Host::handle(const fx::Share& e) {
         });
     if (!ok) return;
 
-    // Explicit sync: the frame names its points; each timeline's fd goes to
-    // a head once, the first time a frame of that head needs it.
-    if (s->current.acquire && s->current.release)
-        c.sync = link::down::SyncPoints{s->current.acquire->timeline, s->current.acquire->value,
-                                        s->current.release->timeline, s->current.release->value};
     const auto bytes = link::encode(link::Down{c});
     for (auto id : e.to) {
         auto it = heads_.find(id);
         if (it == heads_.end()) continue;
-        if (c.sync) {
-            auto& sent = timelines_sent_[id];
-            for (auto tid : {c.sync->acquire_timeline, c.sync->release_timeline}) {
-                if (sent.contains(tid)) continue;
-                auto t = timelines_.find(tid);
-                if (t == timelines_.end()) continue;
-                std::vector<transport::Fd> tfd;
-                tfd.push_back(dup(t->second->get()));
-                if (!tfd.front().valid()) continue;
-                if (it->second.channel.send(link::encode(link::Down{link::down::Timeline{tid, false}}), std::move(tfd)))
-                    sent.insert(tid);
-            }
-        }
         std::vector<transport::Fd> owned;
         for (int fd : fds) owned.push_back(dup(fd));
         if (std::ranges::any_of(owned, [](const auto& f) { return !f.valid(); })) continue;

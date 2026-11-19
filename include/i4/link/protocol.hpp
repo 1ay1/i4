@@ -146,8 +146,6 @@ struct Format {
 /// into a buffer the presenter can scan or sample as it is.
 struct Caps {
     std::vector<Format> formats;
-    /// It can wait on and signal client timelines on the GPU.
-    bool explicit_sync = false;
     friend bool operator==(const Caps&, const Caps&) = default;
 };
 }  // namespace up
@@ -204,31 +202,17 @@ struct DmabufLayout {
     std::vector<Plane> planes;
     friend bool operator==(const DmabufLayout&, const DmabufLayout&) = default;
 };
-/// Explicit sync (linux-drm-syncobj) for one frame: the GPU waits for the
-/// client's `acquire` point before reading, and sets `release` when it has
-/// finished. Timelines are announced once (down::Timeline) and named by id.
-struct SyncPoints {
-    std::uint64_t acquire_timeline;
-    std::uint64_t acquire_point;
-    std::uint64_t release_timeline;
-    std::uint64_t release_point;
-    friend bool operator==(const SyncPoints&, const SyncPoints&) = default;
-};
+/// A frame is sent only once it is READY: a client using explicit sync
+/// (linux-drm-syncobj) has its acquire point waited for by the session, and
+/// its release point signalled by the session once every head has released
+/// the frame. A head never sees a client's timelines (a remote one could not
+/// use them, and drivers will not import another driver's syncobjs anyway).
 struct Content {
     wm::WindowId window;
     std::uint64_t generation;
     Size<space::Buffer> size;
     std::variant<ShmLayout, DmabufLayout> layout;
-    /// Present iff the client uses explicit sync for this frame.
-    std::optional<SyncPoints> sync;
     friend bool operator==(const Content&, const Content&) = default;
-};
-/// A client timeline (a DRM syncobj), passed beside this message as one fd,
-/// once; frames name it by `id`. `gone`: the client destroyed it.
-struct Timeline {
-    std::uint64_t id;
-    bool gone;
-    friend bool operator==(const Timeline&, const Timeline&) = default;
 };
 /// What can be launched on the session's machine (its .desktop files).
 /// Sent at Welcome and whenever it changes. A head's launcher lists THESE,
@@ -280,7 +264,7 @@ struct Cursor {
 }  // namespace down
 
 using Down = std::variant<down::Welcome, down::Refused, down::Applied, down::Content, down::Apps, down::Notice,
-                          down::Timeline, down::Cursor>;
+                          down::Cursor>;
 
 // -- the protocol's identity --------------------------------------------------------
 //

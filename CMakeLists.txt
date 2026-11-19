@@ -81,7 +81,8 @@ target_link_libraries(i4_transport PUBLIC i4::link jaal::jaal PRIVATE i4_warning
 add_library(i4_session STATIC src/server/session.cpp src/server/apps.cpp)
 target_link_libraries(i4_session PUBLIC i4::link jaal::jaal PRIVATE i4_warnings)
 
-add_library(i4_server STATIC src/server/host.cpp src/server/host_protocol.cpp src/server/keyboard.cpp)
+add_library(i4_server STATIC src/server/host.cpp src/server/host_protocol.cpp src/server/keyboard.cpp
+            src/server/syncobj.cpp)
 target_link_libraries(i4_server PUBLIC i4_session i4_transport i4::wl_server PkgConfig::XKB PRIVATE i4_warnings)
 
 add_executable(i4d src/app/i4d.cpp)

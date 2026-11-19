@@ -128,6 +128,16 @@ void Host::destroyed(Surface& s) {
     if (keyboard_focus_ == &s) keyboard_focus_ = nullptr;
     if (pointer_focus_ == &s) pointer_focus_ = nullptr;
     if (cursor_surface_ == &s) cursor_surface_ = nullptr;
+    // Its acquire waits end with it; release points it holds are signalled
+    // (no head will read a destroyed surface's buffers again).
+    for (auto& [n, st] : s.staged) {
+        waits_.erase(st.wait);
+        if (st.release) syncobjs_.signal(st.release->timeline->handle, st.release->value);
+    }
+    s.staged.clear();
+    for (auto& [b, h] : s.held)
+        for (const auto& p : h.release) syncobjs_.signal(p.timeline->handle, p.value);
+    s.held.clear();
     if (s.toplevel)
         if (const auto* m = std::get_if<life::Mapped>(&s.toplevel->life)) {
             windows_.erase(m->window);
@@ -147,11 +157,7 @@ void Host::forget(srv::Client& c) {
     std::erase_if(buffers_, [&](const auto& kv) { return kv.first.first == &c; });
     std::erase_if(params_, [&](const auto& kv) { return kv.first.first == &c; });
     std::erase_if(feedbacks_, [&](const auto& f) { return f.first == &c; });
-    for (auto it = timeline_ids_.begin(); it != timeline_ids_.end();) {
-        if (it->first.first != &c) { ++it; continue; }
-        timelines_.erase(it->second);
-        it = timeline_ids_.erase(it);
-    }
+    std::erase_if(timelines_, [&](const auto& kv) { return kv.first.first == &c; });
     std::erase_if(offers_, [&](const auto& kv) { return kv.first.first == &c || kv.second.first == &c; });
     std::erase_if(sources_, [&](const auto& kv) { return kv.first.first == &c; });
     if (selection_ && selection_->first == &c) set_selection(std::nullopt);
@@ -228,12 +234,18 @@ void Host::committed(Surface& s) {
         if (!std::holds_alternative<DmabufBuffer>(buffers_[{s.client, **s.pending.attach}]))
             return bad(E::unsupported_buffer, "explicit sync needs a dmabuf");
     }
+    const auto acquire = s.pending.attach && *s.pending.attach ? s.pending.acquire : std::nullopt;
+    const auto release = s.pending.attach && *s.pending.attach ? s.pending.release : std::nullopt;
+    const bool attached = s.pending.attach.has_value();
     const auto frames = commit(s.current, s.pending);
+    const auto n = ++s.commits;
 
     if (!s.toplevel) {
         // Not a window (subsurface, popup, cursor): nothing shows it yet, so
-        // its frames are answered now and the client keeps going.
+        // its frames are answered now and the client keeps going; a release
+        // point is signalled at once (the buffer is never read).
         if (s.cursor) cursor_committed(s);
+        if (release) syncobjs_.signal(release->timeline->handle, release->value);
         answer_frames(*s.client, frames, now_ms());
         return;
     }
@@ -246,18 +258,93 @@ void Host::committed(Surface& s) {
         windows_[w] = {s.client, s.id};
         emit(ev::Mapped{w, t.info});
     }
-    const auto w = std::get<life::Mapped>(t.life).window;
 
-    if (s.current.buffer && buffers_.contains({s.client, *s.current.buffer})) {
+    if (acquire) {
+        // Explicit sync: the GPU may still be drawing it. It becomes the
+        // content when the kernel says the acquire point has signalled (an
+        // eventfd on the loop: no thread, no CPU wait, no head involved).
+        Surface::Staged st{s.current.buffer, release, frames, 0};
+        if (auto ev = syncobjs_.when(acquire->timeline->handle, acquire->value)) {
+            auto token = kSyncBase + (next_wait_++ % kSyncSpan);
+            while (waits_.contains(token)) token = kSyncBase + (next_wait_++ % kSyncSpan);
+            if (auto reg = watch_(ev->get(), jaal::interest::read, token)) {
+                st.wait = token;
+                waits_.emplace(token, Waiting{&s, n, std::move(*ev), std::move(*reg)});
+                s.staged.emplace(n, std::move(st));
+                return;
+            }
+        }
+        // The kernel would not wait for us: show it now rather than never.
+        s.staged.emplace(n, std::move(st));
+        acquired(s, n);
+        return;
+    }
+    if (!attached && !s.staged.empty()) {
+        // Only frame callbacks (or damage): they belong to the newest frame,
+        // which is still on its way.
+        auto& newest = s.staged.rbegin()->second.frames;
+        newest.insert(newest.end(), frames.begin(), frames.end());
+        return;
+    }
+    // Implicit sync (or a detach): ready now, and newer than anything staged.
+    supersede(s, n);
+    show(s, s.current.buffer, std::nullopt, frames);
+}
+
+void Host::acquired(Surface& s, std::uint64_t n) {
+    auto it = s.staged.find(n);
+    if (it == s.staged.end()) return;
+    auto st = std::move(it->second);
+    s.staged.erase(it);
+    // Older commits still waiting are superseded by this one: never shown.
+    // Their frame callbacks ride on this frame.
+    for (auto old = s.staged.begin(); old != s.staged.end() && old->first < n;) {
+        st.frames.insert(st.frames.begin(), old->second.frames.begin(), old->second.frames.end());
+        if (old->second.release) syncobjs_.signal(old->second.release->timeline->handle, old->second.release->value);
+        waits_.erase(old->second.wait);
+        old = s.staged.erase(old);
+    }
+    if (n < s.content_commit) {
+        // A newer commit is on screen already: this one never will be.
+        if (st.release) syncobjs_.signal(st.release->timeline->handle, st.release->value);
+        answer_frames(*s.client, st.frames, now_ms());
+        return;
+    }
+    s.content_commit = n;
+    show(s, st.buffer, std::move(st.release), st.frames);
+}
+
+void Host::supersede(Surface& s, std::uint64_t n) {
+    std::vector<id_t> frames;
+    for (auto& [k, st] : s.staged) {
+        frames.insert(frames.end(), st.frames.begin(), st.frames.end());
+        if (st.release) syncobjs_.signal(st.release->timeline->handle, st.release->value);
+        waits_.erase(st.wait);
+    }
+    s.staged.clear();
+    s.content_commit = n;
+    answer_frames(*s.client, frames, now_ms());
+}
+
+void Host::show(Surface& s, std::optional<id_t> buffer, std::optional<SyncPoint> release,
+                const std::vector<id_t>& frames) {
+    auto& t = *s.toplevel;
+    const auto w = std::get<life::Mapped>(t.life).window;
+    if (buffer && buffers_.contains({s.client, *buffer})) {
+        s.content = buffer;
         ++t.generation;
         for (auto cb : frames) s.owed.emplace(t.generation, cb);
         // A head reads this buffer's memory; it goes back to the client
-        // (wl_buffer.release) only when that frame has been shown.
-        s.held[*s.current.buffer] = t.generation;
+        // only when that frame has been shown and released by every head.
+        auto& h = s.held[*buffer];
+        h.generation = t.generation;
+        if (release) h.release.push_back(std::move(*release));
         emit(ev::Committed{w, t.generation});
         return;
     }
     // Detached: nothing is on screen from this surface any more.
+    s.content.reset();
+    if (release) syncobjs_.signal(release->timeline->handle, release->value);
     release_held(s, std::numeric_limits<std::uint64_t>::max());
     answer_frames(*s.client, frames, now_ms());
 }
@@ -673,9 +760,14 @@ void Host::handle(const fx::Release& e) {
 
 void Host::release_held(Surface& s, std::uint64_t shown) {
     for (auto it = s.held.begin(); it != s.held.end();) {
-        const bool done = it->second <= shown && it->first != s.current.buffer;
-        if (done && buffers_.contains({s.client, it->first}))
-            srv::Resource<wl_buffer, 1>{s.client, it->first}.send<wl_buffer::events::release>();
+        const bool done = it->second.generation <= shown && it->first != s.content;
+        if (done) {
+            // Explicit sync: the client waits on its release points, not on
+            // wl_buffer.release (whose delivery the protocol leaves undefined).
+            for (const auto& p : it->second.release) syncobjs_.signal(p.timeline->handle, p.value);
+            if (it->second.release.empty() && buffers_.contains({s.client, it->first}))
+                srv::Resource<wl_buffer, 1>{s.client, it->first}.send<wl_buffer::events::release>();
+        }
         it = done ? s.held.erase(it) : std::next(it);
     }
 }
@@ -717,13 +809,14 @@ void Host::handle(const fx::Formats& e) {
         dmabuf_global_ = display_.add_global<zwp_linux_dmabuf_v1>(
             4, [this](srv::Client& c, std::uint32_t v, id_t id) { bind_dmabuf(c, v, id); });
     }
-    // linux-drm-syncobj exists while every head can wait and signal on the
-    // GPU: then no frame from a client that uses it waits on the CPU.
-    explicit_sync_ = e.explicit_sync;
-    if (!explicit_sync_ && syncobj_global_) {
+    // linux-drm-syncobj exists while clients may render on the GPU and the
+    // kernel can wait on timelines for us: the session keeps the promises
+    // itself, so it needs nothing from the heads.
+    const bool sync = dmabuf_global_.has_value() && syncobjs_.available();
+    if (!sync && syncobj_global_) {
         display_.remove_global(*syncobj_global_);
         syncobj_global_.reset();
-    } else if (explicit_sync_ && !syncobj_global_) {
+    } else if (sync && !syncobj_global_) {
         syncobj_global_ = display_.add_global<wp_linux_drm_syncobj_manager_v1>(
             1, [this](srv::Client& c, std::uint32_t v, id_t id) { bind_syncobj(c, v, id); });
     }
@@ -867,26 +960,19 @@ void Host::bind_syncobj(srv::Client& client, std::uint32_t version, id_t id) {
 
     l->on<M::requests::import_timeline>([this, &client, mid = id](srv::NewObject<wp_linux_drm_syncobj_timeline_v1> t,
                                                                  BorrowedFd fd) {
-        auto owned = std::make_shared<wl::OwnedFd>(fd.get());
-        if (!owned->valid()) {
-            srv::Resource<M, 1>{&client, mid}.post_error(M::error::invalid_timeline, "no timeline fd");
+        // It came by SCM_RIGHTS and is ours: the kernel's handle holds the
+        // syncobj, so the fd closes as soon as it is imported.
+        const wl::OwnedFd owned{fd.get()};
+        const auto handle = syncobjs_.import(owned.get());
+        if (handle == 0) {
+            srv::Resource<M, 1>{&client, mid}.post_error(M::error::invalid_timeline, "not a DRM timeline syncobj");
             return;
         }
-        const auto tid = next_timeline_++;
-        timelines_[tid] = std::move(owned);
-        timeline_ids_[{&client, t.id()}] = tid;
+        timelines_[{&client, t.id()}] = std::make_shared<Timeline>(&syncobjs_, handle);
         auto tl = std::make_shared<srv::RequestListener<wp_linux_drm_syncobj_timeline_v1>>();
         tl->on<wp_linux_drm_syncobj_timeline_v1::requests::destroy>([this, &client, oid = t.id()] {
-            auto it = timeline_ids_.find({&client, oid});
-            if (it == timeline_ids_.end()) return;
-            // Frames in flight may still name it; the heads drop their
-            // copies when told it is gone.
-            const auto gone = it->second;
-            timeline_ids_.erase(it);
-            timelines_.erase(gone);
-            const auto bytes = link::encode(link::Down{link::down::Timeline{gone, true}});
-            for (auto& [hid, h] : heads_)
-                if (timelines_sent_[hid].erase(gone) != 0) (void)h.channel.send(bytes);
+            // Points still pending on it keep it alive (shared).
+            timelines_.erase({&client, oid});
         });
         t.bind<1>(tl);
     });
@@ -903,8 +989,8 @@ void Host::bind_syncobj(srv::Client& client, std::uint32_t version, id_t id) {
         auto sl = std::make_shared<srv::RequestListener<wp_linux_drm_syncobj_surface_v1>>();
         const auto point = [this, &client](Ref<wp_linux_drm_syncobj_timeline_v1> t, std::uint32_t hi,
                                            std::uint32_t lo) -> std::optional<SyncPoint> {
-            auto it = timeline_ids_.find({&client, t.id});
-            if (it == timeline_ids_.end()) return std::nullopt;
+            auto it = timelines_.find({&client, t.id});
+            if (it == timelines_.end()) return std::nullopt;
             return SyncPoint{it->second, (std::uint64_t{hi} << 32) | lo};
         };
         sl->on<wp_linux_drm_syncobj_surface_v1::requests::set_acquire_point>(

@@ -14,6 +14,7 @@
 
 #include <mayag/mayag.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -39,6 +41,19 @@ public:
 
     Host(W& window, mayag::AppConfig cfg, transport::Channel link)
         : window_(window, std::move(cfg)), link_(std::move(link)), native_(window) {}
+    Host(const Host&) = delete;
+    Host& operator=(const Host&) = delete;
+    ~Host() {
+        if (!trace_ || photon_.empty()) return;
+        // Key down (kernel timestamp) to the first presented frame showing
+        // a client's answer (wp_presentation): the whole path, including
+        // the client's own time to draw.
+        auto v = photon_;
+        std::ranges::sort(v);
+        auto at = [&](double q) { return v[std::min(v.size() - 1, static_cast<std::size_t>(q * static_cast<double>(v.size())))]; };
+        std::fprintf(stderr, "i4-head: key->photon  n=%zu  p50 %.2f ms  p90 %.2f ms  p99 %.2f ms  min %.2f ms\n",
+                     v.size(), at(0.5), at(0.9), at(0.99), v.front());
+    }
 
     // -- the window's half, forwarded; the link's half, added ---------------
 
@@ -72,17 +87,11 @@ public:
         for (auto& p : *packets) {
             auto d = link::decode<link::Down>(p.bytes);
             if (!d) continue;
-            if (const auto* t = std::get_if<link::down::Timeline>(&*d)) {
-                timeline(*t, p.fds);
-                continue;
-            }
             Heard h{std::move(*d), std::nullopt, 0};
             if (const auto* c = std::get_if<link::down::Content>(&h.message); c && !p.fds.empty()) {
                 const auto t0 = std::chrono::steady_clock::now();
-                if (const auto* dl = std::get_if<link::down::DmabufLayout>(&c->layout)) {
+                if (const auto* dl = std::get_if<link::down::DmabufLayout>(&c->layout))
                     h.texture = import(*c, *dl, p.fds);
-                    if (h.texture != 0 && c->sync) sync(*c);
-                }
                 else
                     h.pixels = frame(*c, std::get<link::down::ShmLayout>(c->layout), p.fds.front());
                 if (trace_) {
@@ -93,6 +102,12 @@ public:
                                  last_key_ ? ms(t0 - *last_key_) : -1.0);
                     last_key_.reset();
                 }
+            }
+            // The client answered: the next frame drawn shows it, and its
+            // presentation closes the key's input-to-photon measurement.
+            if (answer_due_ && std::holds_alternative<link::down::Content>(h.message)) {
+                if constexpr (requires { native_.mark_input(0.0); }) native_.mark_input(*answer_due_);
+                answer_due_.reset();
             }
             emit_(std::move(h));
         }
@@ -110,7 +125,7 @@ public:
         // it importing tells the program what clients may render into.
         if (!gpu_announced_ && window_.window().can_import_images()) {
             gpu_announced_ = true;
-            emit_(GpuReady{importable(), window_.window().explicit_sync()});
+            emit_(GpuReady{importable()});
         }
         const bool want = link_.wants_write();
         if (reg_ && want != writing_ && reg_->modify(want ? jaal::interest::read_write : jaal::interest::read))
@@ -169,8 +184,12 @@ public:
         }
     }
     void handle(const Say& s) {
-        if (trace_ && !last_key_ && std::holds_alternative<link::up::Key>(s.message))
-            last_key_ = std::chrono::steady_clock::now();
+        if (const auto* k = std::get_if<link::up::Key>(&s.message); k && k->pressed) {
+            if (trace_ && !last_key_) last_key_ = std::chrono::steady_clock::now();
+            // This press went to a client (a binding's never does): time its
+            // answer from when the key went down, by the kernel's clock.
+            if (key_down_at_ && (!answer_due_ || *key_down_at_ < *answer_due_)) answer_due_ = key_down_at_;
+        }
         (void)link_.send(link::encode(s.message));
     }
 
@@ -192,6 +211,13 @@ private:
     /// falls back to mayag's events.
     void tap() {
         if constexpr (requires { native_.set_raw_input([](const mayag::platform::RawInput&) {}); }) {
+            // The head's own events do not start the photon clock: what
+            // counts is when a CLIENT's answer to a key reaches the glass.
+            native_.set_photon_manual(true);
+            native_.set_photon_sink([this](double ms) {
+                photon_.push_back(ms);
+                if (trace_) std::fprintf(stderr, "i4-head: key->photon %.2f ms\n", ms);
+            });
             native_.set_raw_input([this](const mayag::platform::RawInput& in) {
                 namespace r = mayag::platform::raw;
                 if (!emit_) return;
@@ -199,6 +225,7 @@ private:
                     [&]<class T>(const T& e) {
                         if constexpr (std::is_same_v<T, r::Key>) {
                             if (e.pressed && trace_) last_key_ = std::chrono::steady_clock::now();
+                            if (e.pressed) key_down_at_ = native_.event_seconds(e.time);
                             emit_(KeyInput{e.code, e.pressed, mayag::KeyEvent{e.key, e.mods, false}});
                         } else if constexpr (std::is_same_v<T, r::Keymap>) {
                             emit_(KeymapInput{e.text});
@@ -306,43 +333,13 @@ private:
             std::rotate(cached, std::next(cached), win.cache.end());
             cached = std::prev(win.cache.end());
         }
-        // The frame on screen until now: free once the GPU is done with it.
-        // With explicit sync the GPU signals the client's release point
-        // itself (sync()); without, we tell the session (Released).
-        if (win.shown != 0) {
-            if (win.release)
-                window_.window().signal_after_submitted(win.release->timeline, win.release->value);
-            else
-                window_.window().after_gpu([this, w = c.window, g = win.shown] { gpu_done_.push_back({w, g}); });
-        }
-        win.release.reset();
+        // The frame on screen until now: free once the GPU is done with it
+        // (the session then gives the buffer back, or signals the client's
+        // release point under explicit sync).
+        if (win.shown != 0)
+            window_.window().after_gpu([this, w = c.window, g = win.shown] { gpu_done_.push_back({w, g}); });
         win.shown = c.generation;
         return cached->texture;
-    }
-
-    /// A client timeline, once: imported on the GPU, named by id; or gone.
-    void timeline(const link::down::Timeline& t, const std::vector<transport::Fd>& fds) {
-        if (t.gone) {
-            if (auto it = timelines_.find(t.id); it != timelines_.end()) {
-                window_.window().release_timeline(it->second);
-                timelines_.erase(it);
-            }
-            return;
-        }
-        if (fds.empty() || timelines_.contains(t.id)) return;
-        if (const auto gpu = window_.window().import_timeline(fds.front().get()); gpu != 0) timelines_[t.id] = gpu;
-    }
-
-    /// This frame's explicit sync, on the GPU: the next submit waits for the
-    /// client's acquire point before sampling the buffer. Its release point
-    /// is signalled when the buffer leaves the screen, by the submit after
-    /// the one that last sampled it (import() above).
-    void sync(const link::down::Content& c) {
-        const auto a = timelines_.find(c.sync->acquire_timeline);
-        const auto r = timelines_.find(c.sync->release_timeline);
-        if (a == timelines_.end() || r == timelines_.end()) return;
-        window_.window().frame_wait(a->second, c.sync->acquire_point);
-        windows_[c.window].release = GpuPoint{r->second, c.sync->release_point};
     }
 
     /// A window is gone: its imported buffers go with it.
@@ -350,8 +347,6 @@ private:
         auto it = windows_.find(w);
         if (it == windows_.end()) return;
         for (const auto& i : it->second.cache) window_.window().release_texture(i.texture);
-        if (it->second.release)
-            window_.window().signal_after_submitted(it->second.release->timeline, it->second.release->value);
         windows_.erase(it);
     }
 
@@ -372,21 +367,17 @@ private:
     bool scrolled_ = false;
     bool trace_ = std::getenv("I4_HEAD_TRACE") != nullptr;
     std::optional<std::chrono::steady_clock::time_point> last_key_;
+    std::optional<double> key_down_at_;  // the newest key press, kernel time (s)
+    std::optional<double> answer_due_;   // the oldest press sent to a client and not yet answered
+    std::vector<double> photon_;          // key -> photon samples (ms)
     struct Imported {
         std::uint64_t buffer;   // the client's buffer (DmabufLayout::buffer)
         std::uint32_t texture;  // where it is on the GPU
     };
-    struct GpuPoint {
-        std::uint32_t timeline;  // the GPU's handle
-        std::uint64_t value;
-    };
     struct WindowGpu {
         std::vector<Imported> cache;  // least recently shown first
         std::uint64_t shown = 0;      // generation on screen
-        /// Explicit sync: what to signal when the frame on screen leaves it.
-        std::optional<GpuPoint> release;
     };
-    std::map<std::uint64_t, std::uint32_t> timelines_;  // session id -> GPU handle
     std::map<wm::WindowId, WindowGpu> windows_;
     std::uint32_t next_texture_ = 0x2000'0000u;
     std::vector<GpuDone> gpu_done_;

@@ -38,6 +38,7 @@
 
 #include "../transport/channel.hpp"
 #include "keyboard.hpp"
+#include "syncobj.hpp"
 #include "vocab.hpp"
 
 namespace i4::server {
@@ -86,9 +87,21 @@ struct Params {
 
 // -- surfaces ------------------------------------------------------------------
 
-/// A point on a client timeline (linux-drm-syncobj): timeline id, value.
+/// A client timeline (linux-drm-syncobj), imported on i4d's render node.
+/// Shared: commits waiting on it, or holding a release point on it, keep it
+/// alive after the client destroys its object.
+struct Timeline {
+    Syncobjs* objs = nullptr;
+    std::uint32_t handle = 0;
+    Timeline(Syncobjs* o, std::uint32_t h) : objs(o), handle(h) {}
+    Timeline(const Timeline&) = delete;
+    Timeline& operator=(const Timeline&) = delete;
+    ~Timeline() { objs->destroy(handle); }
+};
+
+/// A point on a client timeline.
 struct SyncPoint {
-    std::uint64_t timeline = 0;
+    std::shared_ptr<Timeline> timeline;
     std::uint64_t value = 0;
 };
 
@@ -140,10 +153,30 @@ struct Surface {
     /// must carry acquire and release points.
     bool explicit_sync = false;
     /// Buffers a head may still be reading, each with the generation it was
-    /// last committed at. One goes back to the client (wl_buffer.release)
-    /// once a frame at or after that generation has been shown and it is no
-    /// longer the current buffer.
-    std::map<id_t, std::uint64_t> held;
+    /// last committed at. One goes back to the client (wl_buffer.release, or
+    /// its release points under explicit sync) once a frame at or after that
+    /// generation has been shown and it is no longer the content.
+    struct Held {
+        std::uint64_t generation = 0;
+        std::vector<SyncPoint> release;
+    };
+    std::map<id_t, Held> held;
+    /// The buffer that is this window's content: the newest commit that is
+    /// READY (implicit sync: at once; explicit: once its acquire point has
+    /// signalled). Heads are only ever sent this.
+    std::optional<id_t> content;
+    /// Explicit-sync commits waiting for their acquire point, by commit
+    /// number. The newest to become ready is the content; older ones are
+    /// superseded and released unshown.
+    struct Staged {
+        std::optional<id_t> buffer;
+        std::optional<SyncPoint> release;
+        std::vector<id_t> frames;
+        std::uint64_t wait = 0;  // the eventfd's loop token, 0 = none
+    };
+    std::map<std::uint64_t, Staged> staged;
+    std::uint64_t commits = 0;        // commits so far
+    std::uint64_t content_commit = 0; // the commit `content` came from
     /// wl_pointer.set_cursor gave it the cursor role, with this hotspot
     /// (moved by wl_surface.offset, as the protocol says).
     bool cursor = false;
@@ -244,6 +277,17 @@ private:
     /// A cursor surface committed: copy its (small) image out and give the
     /// buffer straight back, so a client's cursor never waits on a head.
     void cursor_committed(Surface& s);
+    /// Explicit sync: commit `n` of `s` has its acquire point signalled.
+    void acquired(Surface& s, std::uint64_t n);
+    /// A ready commit `n` replaces everything still staged (released unshown).
+    void supersede(Surface& s, std::uint64_t n);
+    /// `buffer` is now the window's content (or none: detached).
+    void show(Surface& s, std::optional<id_t> buffer, std::optional<SyncPoint> release,
+              const std::vector<id_t>& frames);
+    /// Loop tokens for acquire waits: [kSyncBase, kSyncBase + kSyncSpan),
+    /// below the heads' range.
+    static constexpr std::uint64_t kSyncBase = 1u << 8;
+    static constexpr std::uint64_t kSyncSpan = (1u << 16) - (1u << 8);
     /// Offer the current selection to `c` (its data devices), or none.
     void offer_selection(srv::Client& c);
     void set_selection(std::optional<Key> source);
@@ -284,6 +328,9 @@ private:
     HeadId next_head_{1};
     std::uint32_t next_window_ = 1;
 
+    // Declared before everything that can hold a Timeline (surfaces' staged
+    // and held release points, timelines_): destroyed after them.
+    Syncobjs syncobjs_;
     std::map<Key, std::unique_ptr<Surface>> surfaces_;
     std::map<Key, AnyBuffer> buffers_;
     std::map<Key, Params> params_;
@@ -298,15 +345,19 @@ private:
     std::optional<std::uint32_t> dmabuf_global_;  // the registry name, while advertised
     std::uint64_t next_buffer_id_ = 1;
 
-    // linux-drm-syncobj: client timelines (DRM syncobj fds), by id, and
-    // which heads have been sent each. Advertised while every head can
-    // wait/signal on the GPU (fx::Formats carries that).
-    std::map<std::uint64_t, std::shared_ptr<wl::OwnedFd>> timelines_;
-    std::map<Key, std::uint64_t> timeline_ids_;  // the client's object -> id
-    std::map<HeadId, std::set<std::uint64_t>> timelines_sent_;
-    std::uint64_t next_timeline_ = 1;
+    // linux-drm-syncobj, kept by the session itself (syncobj.hpp): client
+    // timelines by protocol object; acquire waits, by the eventfd's token.
+    // Advertised while clients may render on the GPU (dmabuf is offered).
+    std::map<Key, std::shared_ptr<Timeline>> timelines_;
+    struct Waiting {
+        Surface* surface;
+        std::uint64_t commit;  // which of its commits (Surface::commits)
+        wl::OwnedFd event;
+        Registration reg;
+    };
+    std::map<std::uint64_t, Waiting> waits_;  // token -> the acquire it waits for
+    std::uint64_t next_wait_ = 0;
     std::optional<std::uint32_t> syncobj_global_;
-    bool explicit_sync_ = false;
     std::vector<std::pair<srv::Client*, id_t>> feedbacks_;  // to re-send on change
     std::map<wm::WindowId, Key> windows_;
     struct Seat {

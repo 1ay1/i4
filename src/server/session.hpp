@@ -35,7 +35,6 @@ struct Session {
         bool welcomed = false;
         /// What it can sample in place (up::Caps); empty until it says.
         std::vector<link::up::Format> formats;
-        bool explicit_sync = false;
         bool caps_known = false;
         /// Per window: the newest generation it has released.
         std::map<wm::WindowId, std::uint64_t> released;
@@ -70,7 +69,6 @@ struct Session {
         std::uint64_t maps = 0;
         /// What clients were last offered (so a change is announced once).
         std::vector<link::up::Format> offered;
-        bool offered_sync = false;
         /// How the pointer looks now; every head shows it, new ones at once.
         link::down::Cursor cursor;
     };

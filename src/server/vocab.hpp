@@ -103,7 +103,7 @@ struct FramesDone { wm::WindowId window; std::uint64_t generation; };
 struct Release { wm::WindowId window; std::uint64_t generation; };
 /// What clients should render into: the GPU buffer layouts every attached
 /// head can sample in place (linux-dmabuf feedback). Empty: shm only.
-struct Formats { std::vector<link::up::Format> formats; bool explicit_sync = false; };
+struct Formats { std::vector<link::up::Format> formats; };
 /// Disconnect a head that broke the protocol.
 struct Drop { HeadId head; };
 /// Start a process in the session (answered by ev::Launched).

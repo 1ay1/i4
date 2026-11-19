@@ -71,10 +71,8 @@ std::uint64_t released_by_all(const Model& m, wm::WindowId w) {
 /// its caps yet does not narrow the offer; with none known nothing changes.
 void offer(Model& m, std::vector<Cmd>& out) {
     std::optional<std::vector<link::up::Format>> common;
-    bool sync = true;
     for (const auto& [id, h] : m.heads) {
         if (!h.welcomed || !h.caps_known) continue;
-        sync = sync && h.explicit_sync;
         if (!common) {
             common = h.formats;
             continue;
@@ -82,11 +80,9 @@ void offer(Model& m, std::vector<Cmd>& out) {
         std::erase_if(*common, [&](const auto& f) { return std::ranges::find(h.formats, f) == h.formats.end(); });
     }
     if (!common) return;
-    sync = sync && !common->empty();
-    if (*common == m.offered && sync == m.offered_sync) return;
+    if (*common == m.offered) return;
     m.offered = std::move(*common);
-    m.offered_sync = sync;
-    out.push_back(fx::Formats{m.offered, sync});
+    out.push_back(fx::Formats{m.offered});
 }
 
 /// The window under a desktop point, top-most first, and the point in it.
@@ -296,7 +292,6 @@ Cmd Session::update(Model& m, ev::HeadSaid e) {
     if (reply.caps) {
         auto& h = m.heads[e.head];
         h.formats = std::move(reply.caps->formats);
-        h.explicit_sync = reply.caps->explicit_sync;
         h.caps_known = true;
         offer(m, out);
     }
