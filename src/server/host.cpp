@@ -376,6 +376,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
     std::optional<link::down::Encoded> enc;
     std::optional<link::down::Video> video;
     bool nothing_changed = false;
+    bool shadowed = false;  // the CPU tile path made this frame: h.shadow is what the head holds
     link::down::Content c{window, gen, {}, link::down::ShmLayout{}};
     match(
         b->second,
@@ -384,6 +385,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
             if (buf.format != F::argb8888 && buf.format != F::xrgb8888) return;
             const Mapped m{buf.pool->fd.get(), file_size(buf.pool->fd.get())};
             c.size = {buf.width, buf.height};
+            shadowed = true;
             enc = remote::encode(h.shadow[window],
                                  {m.bytes(), buf.width, buf.height, buf.offset, buf.stride, buf.format == F::argb8888});
         },
@@ -479,6 +481,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
             dma_buf_sync sync{DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
             (void)::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
             c.size = {buf.width, buf.height};
+            shadowed = true;
             enc = remote::encode(h.shadow[window], {m.bytes(), buf.width, buf.height, static_cast<std::int32_t>(p.offset),
                                                     static_cast<std::int32_t>(p.stride), buf.fourcc == ar24});
             sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
@@ -509,7 +512,7 @@ void Host::share_remote(HeadId id, HeadConn& h, wm::WindowId window) {
     }
     // I4D_VERIFY on the CPU tile path: the shadow is exactly what the head
     // should now hold (B,G,R per pixel; see I4_HEAD_VERIFY).
-    if (static const bool verify = std::getenv("I4D_VERIFY") != nullptr; verify)
+    if (static const bool verify = std::getenv("I4D_VERIFY") != nullptr; verify && shadowed)
         if (auto sh = h.shadow.find(window); sh != h.shadow.end() && !sh->second.pixels.empty()) {
             std::uint64_t hash = 1469598103934665603ull;
             const auto& px = sh->second.pixels;
