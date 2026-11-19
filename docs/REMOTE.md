@@ -44,6 +44,13 @@ cmake --build build -j --target i4-head
 Or save the key once (`mkdir -p ~/.config/i4 && echo fa64...2ed6 >
 ~/.config/i4/remote.key`) and drop `--key`. `I4_KEY=...` works too.
 
+On a Mac the head forwards real key presses and releases (macOS keycodes
+mapped to evdev, modifiers left/right apart), shows the app's cursor
+(shape, its own image, or hidden) on the Mac's own cursor, draws windows
+as Metal textures updated in place, and goes fullscreen with
+`--fullscreen`. CI builds it and compiles its Metal shaders on macOS on
+every push; nobody has run it against a session on a real Mac yet.
+
 Video is decoded by VideoToolbox (the Mac's hardware decoder). `I4_HEAD_TRACE=1`
 prints each frame (codec, decoder, bytes, decode time) and key->photon
 latency.
