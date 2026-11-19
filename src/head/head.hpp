@@ -32,6 +32,7 @@
 #include "i4/link/predict.hpp"
 #include "i4/link/protocol.hpp"
 #include "i4/wm/bindings.hpp"
+#include "launcher.hpp"
 #include "scene.hpp"
 
 namespace i4::head {
@@ -86,13 +87,24 @@ struct Head {
 
         wm::Arrangement arranged;
         Motion motion;
+
+        /// $mod+d: the session's apps, and the launcher over them.
+        std::vector<link::App> apps;
+        Launcher launcher;
+        std::string terminal;
+        /// mayag reports a printable key twice: the KeyEvent, then its
+        /// TextEvent. When the KeyEvent was a shortcut ($mod+d), the text
+        /// that follows is part of it, not typing: this is that key's name,
+        /// and a TextEvent equal to it (any case) is dropped. Every KeyEvent
+        /// resets it, so it can never eat the text of a different key.
+        std::string swallow;
     };
 
     struct Tick {
         double dt;
     };
-    using Msg = std::variant<Heard, Lost, mayag::KeyEvent, mayag::MouseMove, mayag::MouseDown, mayag::MouseUp,
-                             mayag::ResizeEvent, Tick, mayag::CloseRequest>;
+    using Msg = std::variant<Heard, Lost, mayag::KeyEvent, mayag::TextEvent, mayag::Clicked, mayag::MouseMove,
+                             mayag::MouseDown, mayag::MouseUp, mayag::ResizeEvent, Tick, mayag::CloseRequest>;
     using Cmd = mayag::Cmd<Msg, do_say, mayag::upload_image, mayag::release_image, mayag::set_title>;
     using Sub = mayag::Sub<Msg>;
 
@@ -100,6 +112,8 @@ struct Head {
     static Cmd update(Model& m, Heard h);
     static Cmd update(Model& m, Lost);
     static Cmd update(Model& m, mayag::KeyEvent k);
+    static Cmd update(Model& m, mayag::TextEvent t);
+    static Cmd update(Model& m, mayag::Clicked c);
     static Cmd update(Model& m, mayag::MouseMove e);
     static Cmd update(Model& m, mayag::MouseDown e);
     static Cmd update(Model& m, mayag::MouseUp e);

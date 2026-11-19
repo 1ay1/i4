@@ -52,10 +52,12 @@ struct HeadJoined { HeadId head; };
 /// A decoded message from a head (the host refuses undecodable ones).
 struct HeadSaid { HeadId head; link::Up message; };
 struct HeadLeft { HeadId head; };
+/// What can be launched here (the .desktop files), scanned off the loop.
+struct AppsFound { std::vector<link::App> apps; };
 }  // namespace ev
 
 using Event = std::variant<ev::OutputReady, ev::Mapped, ev::Retitled, ev::Unmapped, ev::Committed,
-                           ev::HeadJoined, ev::HeadSaid, ev::HeadLeft>;
+                           ev::HeadJoined, ev::HeadSaid, ev::HeadLeft, ev::AppsFound>;
 
 // -- effects: program -> host ---------------------------------------------------
 //

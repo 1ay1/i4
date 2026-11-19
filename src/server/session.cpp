@@ -1,6 +1,7 @@
 // src/server/session.cpp — i4d's decisions.
 #include "session.hpp"
 
+#include "apps.hpp"
 #include "i4/base/match.hpp"
 
 namespace i4::server {
@@ -62,6 +63,14 @@ fx::PointerAt hit(const wm::Arrangement& a, Point<space::Desktop> at) {
 }
 
 }  // namespace
+
+Cmd Session::init(Model&) { return Cmd::perform<ev::AppsFound>(&scan_apps); }
+
+Cmd Session::update(Model& m, ev::AppsFound e) {
+    m.apps = std::move(e.apps);
+    if (auto to = welcomed(m); !to.empty()) return fx::Send{std::move(to), link::Down{link::down::Apps{m.apps}}};
+    return {};
+}
 
 Cmd Session::update(Model& m, ev::OutputReady e) {
     std::vector<Cmd> out;
@@ -126,7 +135,8 @@ Cmd Session::update(Model& m, ev::HeadSaid e) {
             return done(std::move(out));
         }
         m.heads[e.head].welcomed = true;
-        // A head that joins late gets every window's current pixels.
+        // What it can launch, then every window's current pixels.
+        out.push_back(fx::Send{{e.head}, link::Down{link::down::Apps{m.apps}}});
         for (const auto& [w, g] : m.generation) out.push_back(fx::Share{{e.head}, w});
     }
     if (reply.step) {

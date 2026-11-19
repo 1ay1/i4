@@ -42,11 +42,15 @@ struct Session {
         std::optional<wm::WindowId> keyboard;
         std::optional<wm::WindowId> pointer;
         std::map<HeadId, Head> heads;
+        std::vector<link::App> apps;
     };
 
     using Msg = Event;
     using Cmd = jaal::Cmd<Msg, do_configure, do_close, do_keyboard_focus, do_pointer_at, do_key, do_button, do_send,
                           do_share, do_frames_done, do_drop, do_spawn>;
+
+    /// Scan the .desktop files off the loop; they arrive as ev::AppsFound.
+    static Cmd init(Model& m);
 
     static Cmd update(Model& m, ev::OutputReady e);
     static Cmd update(Model& m, ev::Mapped e);
@@ -56,6 +60,7 @@ struct Session {
     static Cmd update(Model& m, ev::HeadJoined e);
     static Cmd update(Model& m, ev::HeadSaid e);
     static Cmd update(Model& m, ev::HeadLeft e);
+    static Cmd update(Model& m, ev::AppsFound e);
 
     // The host's events are the program's messages, one for one.
     template <class E>

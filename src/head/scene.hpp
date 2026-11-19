@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "i4/wm/arrange.hpp"
+#include "launcher.hpp"
 
 namespace i4::head {
 
@@ -64,5 +65,12 @@ using Textures = std::map<wm::WindowId, std::uint32_t>;
 /// A window with a texture shows its pixels; one without, its name.
 [[nodiscard]] mayag::Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud,
                                const Textures& textures = {});
+
+/// The node id of the launcher's i-th row, for click hit-testing.
+[[nodiscard]] std::uint64_t launcher_row(std::size_t i);
+
+/// The launcher panel, centred near the top of a `screen`-sized window.
+[[nodiscard]] mayag::Node launcher_view(const Launcher& l, const std::vector<link::App>& apps,
+                                        Size<space::Desktop> screen);
 
 }  // namespace i4::head

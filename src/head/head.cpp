@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
 
 #include "i4/base/match.hpp"
 #include "keys.hpp"
@@ -24,6 +25,15 @@ namespace {
 using Cmd = Head::Cmd;
 
 Cmd say(link::Up u) { return Say{std::move(u)}; }
+
+/// Run the launcher's selection: `exec`, predicted, as a binding would.
+Cmd launch(Head::Model& m) {
+    const auto pick = m.launcher.choice();
+    m.launcher.hide();
+    if (!pick || !m.replica.ready()) return {};
+    auto req = m.replica.act(wm::ev::Run{wm::Script{wm::cmd::Exec{command(m.apps[*pick], m.terminal)}}});
+    return say(std::move(req));
+}
 
 Cmd batch(std::vector<Cmd> out) { return out.empty() ? Cmd::none() : Cmd::batch(std::move(out)); }
 
@@ -52,6 +62,7 @@ Cmd report_output(Head::Model& m) {
 
 Cmd Head::init(Model& m) {
     m.mod = options.mod;
+    m.terminal = options.terminal;
     m.bindings = wm::default_bindings(m.mod, options.terminal);
     return Cmd::batch(say(link::Replica::hello()), Cmd{mayag::SetTitle{"i4"}});
 }
@@ -80,6 +91,12 @@ Cmd Head::update(Model& m, Heard h) {
         return batch(std::move(out));
     }
 
+    if (const auto* a = std::get_if<link::down::Apps>(&h.message)) {
+        m.apps = a->apps;
+        if (m.launcher.open) m.launcher.refilter(m.apps);
+        return {};
+    }
+
     if (auto ok = m.replica.receive(h.message); !ok) {
         std::fprintf(stderr, "i4-head: the session refused this head (a different build?)\n");
         return Cmd::quit(1);
@@ -105,10 +122,40 @@ Cmd Head::update(Model& m, Lost) {
 }
 
 Cmd Head::update(Model& m, mayag::KeyEvent k) {
+    if (std::getenv("I4_HEAD_TRACE") != nullptr)
+        std::fprintf(stderr, "i4-head: key %d mods s%d c%d a%d m%d ready=%d launcher=%d apps=%zu\n",
+                     static_cast<int>(k.key), k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.super,
+                     m.replica.ready(), m.launcher.open, m.apps.size());
     if (!m.replica.ready()) return {};
-    if (const auto c = chord(k)) {
+    const auto c = chord(k);
+    m.swallow.clear();
+
+    // $mod+d toggles the launcher; while it is open it has the keyboard.
+    if (c && *c == wm::Chord{m.mod, "d"}) {
+        m.swallow = c->key;
+        if (m.launcher.open)
+            m.launcher.hide();
+        else
+            m.launcher.show(m.apps);
+        return {};
+    }
+    if (m.launcher.open) {
+        using K = mayag::Key;
+        switch (k.key) {
+            case K::escape: m.launcher.hide(); return {};
+            case K::enter: return launch(m);
+            case K::up: m.launcher.move(-1); return {};
+            case K::down:
+            case K::tab: m.launcher.move(+1); return {};
+            case K::backspace: m.launcher.erase(m.apps); return {};
+            default: return {};  // printable keys arrive as TextEvent
+        }
+    }
+
+    if (c) {
         if (*c == wm::Chord{m.mod | wm::Mod::shift, "e"}) return Cmd::quit(0);  // i3's exit
         if (const auto* script = wm::lookup(m.bindings, *c)) {
+            m.swallow = c->key;
             auto req = m.replica.act(wm::ev::Run{*script});
             rearrange(m);
             return say(std::move(req));
@@ -120,13 +167,32 @@ Cmd Head::update(Model& m, mayag::KeyEvent k) {
     return Cmd::batch(say(link::up::Key{*code, true, mods}), say(link::up::Key{*code, false, mods}));
 }
 
+Cmd Head::update(Model& m, mayag::TextEvent t) {
+    if (std::getenv("I4_HEAD_TRACE") != nullptr) std::fprintf(stderr, "i4-head: text '%s'\n", t.text.c_str());
+    if (const auto twin = std::exchange(m.swallow, {});
+        twin.size() == 1 && t.text.size() == 1 && (t.text[0] | 0x20) == (twin[0] | 0x20))
+        return {};
+    if (m.launcher.open) m.launcher.type(m.apps, t.text);
+    return {};
+}
+
+Cmd Head::update(Model& m, mayag::Clicked c) {
+    if (!m.launcher.open) return {};
+    for (std::size_t i = 0; i < m.launcher.shown.size(); ++i)
+        if (c.node == launcher_row(i)) {
+            m.launcher.selected = i;
+            return launch(m);
+        }
+    return {};
+}
+
 Cmd Head::update(Model& m, mayag::MouseMove e) {
-    if (!m.replica.ready()) return {};
+    if (!m.replica.ready() || m.launcher.open) return {};
     return say(link::up::Motion{desktop(e.position)});
 }
 
 Cmd Head::update(Model& m, mayag::MouseDown e) {
-    if (!m.replica.ready()) return {};
+    if (!m.replica.ready() || m.launcher.open) return {};
     return Cmd::batch(say(link::up::Motion{desktop(e.position)}), say(link::up::Button{evdev(e.button), true}));
 }
 
@@ -162,7 +228,9 @@ mayag::Node Head::view(const Model& m) {
         for (auto ws : o.workspaces) hud.workspaces.push_back(s.workspaces.at(ws).name);
     for (const auto& sc : m.arranged.screens) hud.focused_workspace = sc.workspace_name;
     hud.latency_ms = -1;  // a real link: the bar shows requests in flight instead
-    return head::view(m.arranged, m.motion, hud, m.textures);
+    auto frame = head::view(m.arranged, m.motion, hud, m.textures);
+    if (m.launcher.open) frame.add_child(launcher_view(m.launcher, m.apps, m.screen));
+    return frame;
 }
 
 }  // namespace i4::head

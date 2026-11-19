@@ -78,7 +78,7 @@ target_link_libraries(i4_transport PUBLIC i4::link jaal::jaal PRIVATE i4_warning
 
 # -- server: i4d ------------------------------------------------------------------
 # session.cpp is the program (pure, tested headless); host*.cpp the shell.
-add_library(i4_session STATIC src/server/session.cpp)
+add_library(i4_session STATIC src/server/session.cpp src/server/apps.cpp)
 target_link_libraries(i4_session PUBLIC i4::link jaal::jaal PRIVATE i4_warnings)
 
 add_library(i4_server STATIC src/server/host.cpp src/server/host_protocol.cpp src/server/keyboard.cpp)
@@ -93,7 +93,7 @@ target_link_libraries(i4-watch PRIVATE i4_transport i4_warnings)
 # -- head + preview ---------------------------------------------------------------
 option(I4_WITH_HEAD "Build the mayag head and i4-preview" ON)
 if(I4_WITH_HEAD)
-    add_library(i4_head STATIC src/head/scene.cpp src/head/pixels.cpp)
+    add_library(i4_head STATIC src/head/scene.cpp src/head/pixels.cpp src/head/launcher.cpp)
     target_link_libraries(i4_head PUBLIC i4::link mayag::mayag PRIVATE i4_warnings)
 
     add_executable(i4-preview src/app/preview.cpp)

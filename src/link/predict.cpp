@@ -27,7 +27,9 @@ std::expected<void, Replica::Error> Replica::receive(const Down& d) {
         },
         // Pixels are the data plane: the head's renderer takes them, the
         // replica has nothing to do with them.
-        [&](const down::Content&) -> R { return {}; });
+        [&](const down::Content&) -> R { return {}; },
+        // Nor is the app list: the head's launcher keeps it.
+        [&](const down::Apps&) -> R { return {}; });
 }
 
 void Replica::rebuild() {

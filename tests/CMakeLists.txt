@@ -41,6 +41,11 @@ if(TARGET i4-preview)
     target_link_libraries(test_head PRIVATE i4_head i4_transport i4_warnings)
     target_include_directories(test_head PRIVATE ${PROJECT_SOURCE_DIR}/src)
     add_test(NAME test_head COMMAND test_head)
+
+    add_executable(test_launcher test_launcher.cpp ${PROJECT_SOURCE_DIR}/src/head/head.cpp)
+    target_link_libraries(test_launcher PRIVATE i4_head i4_session i4_transport i4_warnings)
+    target_include_directories(test_launcher PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    add_test(NAME test_launcher COMMAND test_launcher)
 endif()
 
 add_subdirectory(wl)

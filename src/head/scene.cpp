@@ -140,4 +140,43 @@ Node view(const wm::Arrangement& a, const Motion& motion, const Hud& hud, const 
     return (v_list(std::move(layers)) | width(pct(100)) | height(pct(100)) | bg(crust)).build();
 }
 
+std::uint64_t launcher_row(std::size_t i) { return node_id("i4.launcher.row", i); }
+
+Node launcher_view(const Launcher& l, const std::vector<link::App>& apps, Size<space::Desktop> screen) {
+    constexpr float width_px = 640.0f;
+    constexpr std::size_t visible = 9;
+
+    // A window of rows around the selection, so it scrolls with the arrows.
+    const std::size_t first = l.selected >= visible ? l.selected + 1 - visible : 0;
+    std::vector<Node> rows;
+    for (std::size_t i = first; i < l.shown.size() && i < first + visible; ++i) {
+        const auto& app = apps[l.shown[i]];
+        const bool on = i == l.selected;
+        rows.push_back((h(text_owned(app.name) | font(14) | semibold | fg(on ? crust : text_c),
+                          text_owned(app.comment) | font(12) | fg(on ? surface0 : overlay0) | ellipsis | grow())
+                        | gap(12) | align(Align::center) | pad(8, 14) | width(pct(100)) | radius(8)
+                        | bg(on ? mauve : base.fade(0.0f)) | id_of_raw(launcher_row(i)))
+                           .build());
+    }
+    if (rows.empty())
+        rows.push_back((text_owned(apps.empty() ? std::string("no applications found on the session")
+                                                : std::string("nothing matches"))
+                        | font(13) | fg(overlay0) | pad(10, 14))
+                           .build());
+
+    const auto count = std::to_string(l.shown.size()) + " / " + std::to_string(apps.size());
+    const float x = std::max(8.0f, (static_cast<float>(screen.width) - width_px) / 2.0f);
+    const float y = static_cast<float>(screen.height) * 0.18f;
+    return (v(h(text<"❯"> | font(18) | bold | fg(mauve),
+                text_owned(l.query.empty() ? std::string("run an app…") : l.query + "▁") | font(18)
+                    | fg(l.query.empty() ? overlay0 : text_c) | grow(),
+                text_owned(count) | font(12) | fg(overlay0))
+                  | gap(12) | align(Align::center) | pad(6, 6),
+              box() | height(1) | width(pct(100)) | bg(surface0),
+              v_list(std::move(rows), 2.0f) | width(pct(100)))
+            | gap(8) | pad(12) | absolute(x, y) | width(width_px)
+            | bg(mantle) | border(2, mauve) | radius(12) | shadow(40, crust.fade(0.8f), {0.0f, 12.0f}))
+        .build();
+}
+
 }  // namespace i4::head

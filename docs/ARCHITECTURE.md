@@ -199,6 +199,23 @@ shm pool fd, passed by `SCM_RIGHTS`, so nothing is copied. The head answers
 app draws at the rate the screen, local or remote, actually takes frames.
 With no head attached, frames are released at once and no client hangs.
 
+## The launcher ($mod+d)
+
+i4's dmenu lives in the head (`src/head/launcher.*`), but its list comes
+from the session:
+
+- **Apps are scanned where they run.** i4d reads the `.desktop` files
+  (`src/server/apps.cpp`) with a `Cmd::perform` off the loop, and sends the
+  list as `down::Apps`. A laptop head attached to a desktop session
+  therefore lists the desktop's apps.
+- **Launching goes through the normal path.** The head sends a predicted
+  `exec` request, the same one a key binding produces. It enters the
+  replicated log and the window opens where i3 would put it.
+- **Ranking is fuzzy and pure.** A prefix beats a word start, which beats
+  scattered letters; contiguous runs score extra; and the comment is
+  searched as a fallback ("browser" finds Firefox). Terminal apps run in
+  `$TERMINAL`.
+
 ## Types do the checking
 
 - **Coordinate spaces are types** (`Point<space::Desktop>`, `Rect<space::Surface>`, …).

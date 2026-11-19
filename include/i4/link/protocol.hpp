@@ -25,7 +25,9 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <variant>
+#include <vector>
 
 #include "i4/base/geom.hpp"
 #include "i4/base/id.hpp"
@@ -40,6 +42,16 @@ namespace i4::link {
 using Seq = Id<struct SeqTag, std::uint64_t>;
 /// A head's name for one of its requests, unique per connection.
 using Nonce = Id<struct NonceTag, std::uint64_t>;
+
+/// A launchable application on the session's machine.
+struct App {
+    std::string id;       // its desktop-file id: "org.mozilla.firefox"
+    std::string name;     // "Firefox"
+    std::string comment;  // "Browse the World Wide Web"
+    std::string exec;     // a shell command, field codes already removed
+    bool terminal = false;  // runs inside a terminal
+    friend bool operator==(const App&, const App&) = default;
+};
 
 // -- head -> server ------------------------------------------------------------
 
@@ -124,9 +136,16 @@ struct Content {
     bool alpha;
     friend bool operator==(const Content&, const Content&) = default;
 };
+/// What can be launched on the session's machine (its .desktop files).
+/// Sent at Welcome and whenever it changes. A head's launcher lists THESE,
+/// not its own: the apps run where the session runs.
+struct Apps {
+    std::vector<App> apps;
+    friend bool operator==(const Apps&, const Apps&) = default;
+};
 }  // namespace down
 
-using Down = std::variant<down::Welcome, down::Refused, down::Applied, down::Content>;
+using Down = std::variant<down::Welcome, down::Refused, down::Applied, down::Content, down::Apps>;
 
 // -- the protocol's identity --------------------------------------------------------
 //

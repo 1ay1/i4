@@ -100,10 +100,11 @@ TEST(a_head_is_welcomed_with_the_state_and_hears_every_event) {
     h.record().clear();
     const auto head = attach(h);
     auto sent = all<do_send>(h);
-    CHECK_EQ(sent.size(), 1u);
+    CHECK_EQ(sent.size(), 2u);  // Welcome, then what it can launch
     const auto* welcome = std::get_if<link::down::Welcome>(&sent.at(0).message);
     CHECK(welcome != nullptr);
     CHECK(welcome && welcome->state == h.model().session.state());
+    CHECK(sent.size() == 2 && is<link::down::Apps>(sent.at(1).message));
 
     h.send(ev::Mapped{wm::WindowId{2}, app("b")});
     sent = all<do_send>(h);
@@ -121,6 +122,18 @@ TEST(a_head_from_another_build_is_refused_and_dropped) {
     CHECK(sent.size() == 1 && is<link::down::Refused>(sent.at(0).message));
     CHECK_EQ(h.effects<do_drop>().size(), 1u);
     CHECK(h.model().heads.empty());
+}
+
+TEST(found_apps_go_to_every_welcomed_head) {
+    H h;
+    h.send(ev::OutputReady{output()});
+    const auto head = attach(h);
+    h.record().clear();
+    h.send(ev::AppsFound{{link::App{"foot", "Foot", "Terminal", "foot", false}}});
+    const auto sent = h.effects<do_send>();
+    CHECK(sent.size() == 1 && sent.at(0).to == std::vector<HeadId>{head});
+    const auto* apps = sent.empty() ? nullptr : std::get_if<link::down::Apps>(&sent.at(0).message);
+    CHECK(apps && apps->apps.size() == 1 && apps->apps.front().name == "Foot");
 }
 
 TEST(a_head_request_is_applied_broadcast_and_obeyed) {
