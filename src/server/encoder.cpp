@@ -196,6 +196,7 @@ struct Encoder::Impl {
     /// The frame staged in copy_tex (its buffer id), so read() of the frame
     /// changes() just hashed reads it without copying it again.
     std::optional<std::uint64_t> staged;
+    std::vector<std::uint32_t> hash_raw;  // the hash readback, reused
 
     /// The planes texture (W x 3H, R8), registered with CUDA, by size.
     GLuint planes = 0;
@@ -621,7 +622,8 @@ struct Encoder::Impl {
         glDrawArrays(GL_TRIANGLES, 0, 3);
         // Synchronous: when this returns the GPU has read the client's buffer
         // (copy, then hash), so the host may hand it back at once.
-        std::vector<std::uint32_t> raw(static_cast<std::size_t>(cols) * static_cast<std::size_t>(f.height) * 4);
+        auto& raw = hash_raw;
+        raw.resize(static_cast<std::size_t>(cols) * static_cast<std::size_t>(f.height) * 4);
         glReadPixels(0, 0, cols, f.height, GL_RGBA_INTEGER, GL_UNSIGNED_INT, raw.data());
         if (glGetError() != GL_NO_ERROR) return std::nullopt;
         if (tr) {
@@ -640,6 +642,14 @@ struct Encoder::Impl {
             std::ranges::fill(out.tiles, std::uint8_t{1});
             out.fresh = true;
         } else {
+            // Which rows changed at all, first: a keystroke touches a dozen
+            // rows of 1500; only a frame where many rows changed can be a
+            // scroll, and only then are row signatures and the vote worth it.
+            int changed_rows = 0;
+            for (int y = 0; y < f.height; ++y)
+                if (std::memcmp(&hashes[static_cast<std::size_t>(y) * cols], &s.hashes[static_cast<std::size_t>(y) * cols],
+                                static_cast<std::size_t>(cols) * sizeof(std::uint64_t)) != 0)
+                    ++changed_rows;
             // Full-row signatures, for scroll detection.
             auto rows_of = [&](const std::vector<std::uint64_t>& hs) {
                 std::vector<std::uint64_t> r(static_cast<std::size_t>(f.height));
@@ -651,7 +661,8 @@ struct Encoder::Impl {
                 return r;
             };
             static const bool no_scroll = std::getenv("I4D_NO_SCROLL") != nullptr;
-            if (!no_scroll) out.scroll = find_scroll(rows_of(hashes), rows_of(s.hashes), f.width, f.height);
+            if (!no_scroll && changed_rows >= 64)
+                out.scroll = find_scroll(rows_of(hashes), rows_of(s.hashes), f.width, f.height);
             // What the head holds after the move, as hashes: compare to that.
             for (int y = 0; y < f.height; ++y) {
                 int from = y;
